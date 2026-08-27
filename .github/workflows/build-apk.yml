@@ -1,0 +1,66 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Build Web Assets
+        run: npm run build
+
+      - name: Initialize Capacitor Android
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npx cap add android || true
+          npx cap sync android
+
+      - name: Build Android APK with Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Sign APK with Keystore
+        if: always()
+        run: |
+          if [ -f "keystore.jks" ]; then
+            $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 4 android/app/build/outputs/apk/release/app-release-unsigned.apk soberwatch-aligned.apk || cp android/app/build/outputs/apk/release/app-release-unsigned.apk soberwatch-aligned.apk
+            $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks keystore.jks --ks-pass pass:soberwatch2026 --ks-key-alias soberwatchalias --key-pass pass:soberwatch2026 --out SoberWatch.apk soberwatch-aligned.apk || cp android/app/build/outputs/apk/release/app-release-unsigned.apk SoberWatch.apk
+          else
+            cp android/app/build/outputs/apk/release/*.apk SoberWatch.apk || true
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoberWatch-Android-APK
+          path: |
+            SoberWatch.apk
+            android/app/build/outputs/apk/**/*.apk

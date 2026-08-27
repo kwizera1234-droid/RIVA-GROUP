@@ -1,0 +1,11 @@
+{
+  "name": "Remix Remix Remix Remix Remix SoberWatch",
+  "description": "Real-time biometric sobriety monitoring and AI Voice Assistant with Kinyarwanda commands and automated native emergency calling.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

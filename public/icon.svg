@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FCEBA4"/>
+      <stop offset="50%" stop-color="#D4AF37"/>
+      <stop offset="100%" stop-color="#8C7322"/>
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141414"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#bgGrad)"/>
+  <rect width="504" height="504" x="4" y="4" rx="124" fill="none" stroke="url(#goldGrad)" stroke-width="6" opacity="0.4"/>
+  
+  <!-- Outer Shield Ring -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="url(#goldGrad)" stroke-width="4" stroke-dasharray="8 8" opacity="0.6"/>
+  <circle cx="256" cy="256" r="160" fill="none" stroke="url(#goldGrad)" stroke-width="8"/>
+  
+  <!-- Pulse / ECG Path in Center -->
+  <path d="M 140 256 L 190 256 L 210 200 L 235 320 L 265 170 L 295 310 L 320 230 L 340 256 L 372 256" 
+        fill="none" 
+        stroke="url(#goldGrad)" 
+        stroke-width="14" 
+        stroke-linecap="round" 
+        stroke-linejoin="round"/>
+</svg>

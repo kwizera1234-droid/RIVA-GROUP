@@ -1,0 +1,6 @@
+{
+  "appId": "com.soberwatch.app",
+  "appName": "SoberWatch",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
