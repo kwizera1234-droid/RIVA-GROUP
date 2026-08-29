@@ -22,7 +22,7 @@ export const SOSButton: React.FC<SOSButtonProps> = ({
   const handleTriggerSOS = () => {
     emergencyService.triggerEmergency('manual_sos', {
       customCountdown: config.sosCountdownSeconds || 10,
-      notes: 'Manual SOS button pressed by user',
+      notes: 'Emergency SOS activated by user',
     });
   };
 

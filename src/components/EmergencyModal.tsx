@@ -158,6 +158,9 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
                 <div className="text-[11px] text-red-300/70 mt-0.5">
                   Calling <strong className="text-white">{targetName}</strong> ({targetPhone}) automatically.
                 </div>
+                <div className="text-[11px] text-amber-300 font-semibold mt-1.5 flex items-center justify-center gap-1.5">
+                  <span>🎙️ Voice Stop: Vuga &quot;Hagarika&quot; cyangwa &quot;Cancel&quot; guhagarika</span>
+                </div>
               </div>
             </div>
           )}

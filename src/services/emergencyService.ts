@@ -167,7 +167,7 @@ class EmergencyService {
       backendLogged: false,
       testMode: this.config.isTestMode,
       recognizedText: options?.recognizedText,
-      notes: options?.notes || (isManual ? 'Manual SOS triggered by user' : `Automatic emergency detection: ${type}`),
+      notes: options?.notes || (isManual ? 'Emergency SOS triggered by user' : `Automatic emergency detection: ${type}`),
     };
 
     this.currentState = 'EMERGENCY_DETECTED';

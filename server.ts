@@ -138,7 +138,7 @@ Rules:
   }
 });
 
-// 3. Audio Speech-to-Text Transcription API (Gemini Multimodal / Transcribe)
+// 3. Audio Speech-to-Text Transcription API (Gemini Multimodal STT)
 app.post('/api/voice/transcribe', async (req, res) => {
   try {
     const { audioBase64, mimeType = 'audio/webm', language = 'rw' } = req.body;
@@ -151,25 +151,30 @@ app.post('/api/voice/transcribe', async (req, res) => {
     }
 
     const ai = getGenAI();
-
-    const audioPart = {
-      inlineData: {
-        mimeType: mimeType.split(';')[0] || 'audio/webm',
-        data: audioBase64,
-      },
-    };
-
-    const textPart = {
-      text: `Transcribe this audio accurately. The speaker is likely speaking Kinyarwanda, English, Swahili, or French.
-Provide only the exact transcription text without any additional commentary or quotes. If the audio is completely silent or unrecognizable noise, return an empty string.`,
-    };
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim();
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
-      contents: { parts: [audioPart, textPart] },
+      model: 'gemini-2.5-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType: cleanMime,
+            data: audioBase64,
+          },
+        },
+        `You are an expert multilingual speech-to-text transcription engine specializing in Kinyarwanda, English, French, and Swahili.
+Primary expected language: ${language === 'rw' ? 'Kinyarwanda' : language === 'fr' ? 'French' : language === 'sw' ? 'Swahili' : 'English'}.
+
+Task:
+Transcribe the speech in this audio with extreme accuracy.
+- If the user speaks Kinyarwanda (e.g. "Reba uko meze", "Hamagara John", "Ubutabazi", "Ntabara", "Hagarika", "Mbwira BAC yanjye"), transcribe in correct Kinyarwanda spelling.
+- If code-switching between Kinyarwanda and English (e.g. "Reba heartbeat yanjye"), preserve both naturally.
+- If the audio is empty, background noise, or no spoken words, output EMPTY STRING.
+- Output ONLY the verbatim transcribed words. Do not add quotes, markdown, or commentary.`,
+      ],
     });
 
-    const transcript = (response.text || '').trim().replace(/^["']|["']$/g, '');
+    const transcript = (response.text || '').trim().replace(/^["'`]|["'`]$/g, '');
 
     return res.json({
       transcript,

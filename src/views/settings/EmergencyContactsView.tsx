@@ -320,7 +320,7 @@ export const EmergencyContactsView: React.FC<EmergencyContactsProps> = ({ langua
 
           <button
             id="simulate-sos-btn"
-            onClick={() => emergencyService.triggerEmergency('manual_sos', { notes: 'Manual SOS button simulated via Test Suite' })}
+            onClick={() => emergencyService.triggerEmergency('manual_sos', { notes: 'Emergency SOS simulated via Test Suite' })}
             className="px-3.5 py-2.5 rounded-xl bg-red-950/40 hover:bg-red-950/60 border border-red-500/40 text-red-200 text-xs font-mono font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
           >
             <ShieldAlert className="w-4 h-4 text-red-400" />
