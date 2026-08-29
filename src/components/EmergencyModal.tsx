@@ -58,7 +58,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
     switch (type) {
       case 'crash': return 'Severe Vehicle Collision Detected';
       case 'fall': return 'Sudden Fall & Ground Impact';
-      case 'manual_sos': return 'Manual SOS Emergency Trigger';
+      case 'manual_sos': return 'Emergency SOS Trigger';
       case 'critical_health': return 'Critical Biometric Threshold';
       case 'soberband': return 'SoberBand Hardware Emergency Signal';
       default: return 'Emergency Signal Triggered';
@@ -196,7 +196,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-[#D4AF37]">
                 <MapPin className="w-3.5 h-3.5" />
-                <span className="font-bold text-[11px]">EMERGENCY LOCATION (GPS)</span>
+                <span className="font-bold text-[11px]">LIVE LOCATION SYNC</span>
               </div>
               {event?.latitude ? (
                 <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
@@ -219,7 +219,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 text-[10px] text-[#D4AF37] hover:underline"
                   >
-                    <span>{t.viewOnGoogleMaps}</span>
+                    <span>Maps</span>
                     <ExternalLink className="w-2.5 h-2.5" />
                   </a>
                 )}
@@ -251,7 +251,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
               onClick={() => emergencyService.cancelEmergency('User dismissed active call modal')}
               className="w-full py-3 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 text-white text-xs font-mono font-semibold transition cursor-pointer"
             >
-              Dismiss / Return to Dashboard
+              Close
             </button>
           )}
 

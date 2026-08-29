@@ -127,11 +127,13 @@ export type VoiceIntent =
   | 'EMERGENCY_REQUEST'
   | 'CALL_PRIMARY_CONTACT'
   | 'CALL_SECONDARY_CONTACT'
+  | 'CALL_CONTACT'
   | 'CANCEL_EMERGENCY'
   | 'CHECK_HEALTH'
   | 'CHECK_DRIVING_READINESS'
   | 'CHECK_ALCOHOL_STATUS'
   | 'CHECK_LOCATION'
+  | 'GET_DAILY_REPORT'
   | 'HELP'
   | 'UNKNOWN_COMMAND';
 
@@ -142,6 +144,30 @@ export type VoiceAssistantStatus =
   | 'processing' 
   | 'speaking' 
   | 'error';
+
+export type VoiceErrorCode =
+  | 'NO_MICROPHONE_PERMISSION'
+  | 'NO_SPEECH'
+  | 'NO_MATCH'
+  | 'NETWORK_ERROR'
+  | 'RECOGNIZER_ERROR'
+  | 'STT_UNAVAILABLE'
+  | 'EMPTY_TRANSCRIPT'
+  | 'AI_ERROR'
+  | 'TOOL_ERROR'
+  | 'TTS_ERROR';
+
+export interface VoiceDiagnosticsState {
+  micStatus: 'idle' | 'requesting' | 'active' | 'denied' | 'error';
+  sttStatus: 'idle' | 'listening' | 'recognizing' | 'transcribing' | 'success' | 'error';
+  ttsStatus: 'idle' | 'generating' | 'speaking' | 'completed' | 'error';
+  lastTranscript: string;
+  detectedLanguage: Language;
+  lastIntent: VoiceIntentMatch | null;
+  lastTool: string | null;
+  errorCode: VoiceErrorCode | null;
+  logs: string[];
+}
 
 export interface VoiceIntentMatch {
   intent: VoiceIntent;
@@ -166,4 +192,6 @@ export interface VoiceAssistantConfig {
   voicePitch: number;
   voiceRate: number;
   countdownSeconds: number;
+  sttProvider?: 'auto' | 'web_speech' | 'gemini_audio';
+  ttsProvider?: 'auto' | 'gemini_tts' | 'web_synthesis';
 }

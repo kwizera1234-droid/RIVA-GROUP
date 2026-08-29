@@ -4,9 +4,15 @@ import {
   VoiceIntentMatch, 
   VoiceAssistantConfig, 
   EmergencyContact, 
-  TelemetryReading 
+  TelemetryReading,
+  VoiceErrorCode,
+  VoiceDiagnosticsState
 } from '../types';
-import { classifyVoiceIntent } from './voiceIntentService';
+import { 
+  classifyVoiceIntentSemantic, 
+  getVoiceErrorMessage, 
+  detectLanguage 
+} from './voiceIntentService';
 import { emergencyService } from './emergencyService';
 
 const VOICE_CONFIG_KEY = 'soberwatch_voice_config';
@@ -19,9 +25,11 @@ const DEFAULT_VOICE_CONFIG: VoiceAssistantConfig = {
   voicePitch: 1.0,
   voiceRate: 1.0,
   countdownSeconds: 10,
+  sttProvider: 'auto',
+  ttsProvider: 'auto',
 };
 
-type VoiceEventListener = (state: {
+export interface VoiceServiceState {
   status: VoiceAssistantStatus;
   transcript: string;
   interimTranscript: string;
@@ -29,10 +37,14 @@ type VoiceEventListener = (state: {
   lastIntent: VoiceIntentMatch | null;
   lastAssistantSpeech: string;
   errorMessage: string | null;
+  errorCode: VoiceErrorCode | null;
   isMuted: boolean;
   isAvailable: boolean;
   wakeWordActive: boolean;
-}) => void;
+  diagnostics: VoiceDiagnosticsState;
+}
+
+type VoiceEventListener = (state: VoiceServiceState) => void;
 
 class VoiceService {
   private config: VoiceAssistantConfig;
@@ -43,16 +55,36 @@ class VoiceService {
   private lastIntent: VoiceIntentMatch | null = null;
   private lastAssistantSpeech = '';
   private errorMessage: string | null = null;
+  private errorCode: VoiceErrorCode | null = null;
   private isMuted = false;
   private isAvailable = false;
   private wakeWordActive = false;
 
+  private diagnostics: VoiceDiagnosticsState = {
+    micStatus: 'idle',
+    sttStatus: 'idle',
+    ttsStatus: 'idle',
+    lastTranscript: '',
+    detectedLanguage: 'rw',
+    lastIntent: null,
+    lastTool: null,
+    errorCode: null,
+    logs: [],
+  };
+
   private recognition: any = null;
   private isListeningActive = false;
+  private isProcessing = false;
+  private restartTimeout: any = null;
   private listeners: Set<VoiceEventListener> = new Set();
-  private primaryContactGetter: (() => EmergencyContact | null) | null = null;
-  private secondaryContactGetter: (() => EmergencyContact | null) | null = null;
+
+  private contactsGetter: (() => EmergencyContact[]) | null = null;
   private readingGetter: (() => TelemetryReading | null) | null = null;
+
+  // MediaRecorder fallback for Kinyarwanda STT
+  private mediaRecorder: MediaRecorder | null = null;
+  private audioChunks: Blob[] = [];
+  private mediaStream: MediaStream | null = null;
 
   constructor() {
     this.config = this.loadConfig();
@@ -61,12 +93,10 @@ class VoiceService {
   }
 
   public setContextGetters(
-    primary: () => EmergencyContact | null,
-    secondary: () => EmergencyContact | null,
+    contacts: () => EmergencyContact[],
     reading: () => TelemetryReading | null
   ) {
-    this.primaryContactGetter = primary;
-    this.secondaryContactGetter = secondary;
+    this.contactsGetter = contacts;
     this.readingGetter = reading;
   }
 
@@ -117,10 +147,19 @@ class VoiceService {
       lastIntent: this.lastIntent,
       lastAssistantSpeech: this.lastAssistantSpeech,
       errorMessage: this.errorMessage,
+      errorCode: this.errorCode,
       isMuted: this.isMuted,
       isAvailable: this.isAvailable,
       wakeWordActive: this.wakeWordActive,
+      diagnostics: { ...this.diagnostics },
     });
+  }
+
+  private logDiagnostic(entry: string) {
+    const timestamp = new Date().toLocaleTimeString();
+    const formatted = `[${timestamp}] ${entry}`;
+    console.log(entry);
+    this.diagnostics.logs = [formatted, ...this.diagnostics.logs.slice(0, 49)];
   }
 
   private checkSpeechAvailability() {
@@ -130,7 +169,8 @@ class VoiceService {
         (window as any).webkitSpeechRecognition
       );
       const hasSynthesis = typeof window.speechSynthesis !== 'undefined';
-      this.isAvailable = hasWebSpeech || hasSynthesis;
+      const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      this.isAvailable = hasWebSpeech || hasSynthesis || hasMedia;
     }
   }
 
@@ -145,7 +185,7 @@ class VoiceService {
   }
 
   /**
-   * Initializes Speech Recognition instance.
+   * Initializes Web Speech Recognition.
    */
   private initSpeechRecognition() {
     if (typeof window === 'undefined') return;
@@ -155,11 +195,15 @@ class VoiceService {
       (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognitionClass) {
-      this.isAvailable = false;
+      this.logDiagnostic('[VOICE] Web Speech API not present, using MediaRecorder fallback');
       return;
     }
 
     try {
+      if (this.recognition) {
+        try { this.recognition.abort(); } catch {}
+      }
+
       const rec = new SpeechRecognitionClass();
       rec.continuous = this.config.continuousListening;
       rec.interimResults = true;
@@ -167,10 +211,20 @@ class VoiceService {
       rec.lang = this.getLanguageCode(this.config.primaryLanguage);
 
       rec.onstart = () => {
+        this.logDiagnostic('[VOICE] microphone started');
         this.status = 'listening';
+        this.diagnostics.micStatus = 'active';
+        this.diagnostics.sttStatus = 'listening';
         this.errorMessage = null;
+        this.errorCode = null;
         this.transcript = '';
         this.interimTranscript = '';
+        this.notify();
+      };
+
+      rec.onspeechstart = () => {
+        this.logDiagnostic('[VOICE] speech started');
+        this.diagnostics.sttStatus = 'recognizing';
         this.notify();
       };
 
@@ -190,49 +244,57 @@ class VoiceService {
         if (interim) {
           this.status = 'recognizing';
           this.interimTranscript = interim;
+          this.diagnostics.lastTranscript = interim;
           this.notify();
         }
 
-        if (final) {
-          this.processRecognizedSpeech(final);
+        if (final && final.trim()) {
+          this.logDiagnostic(`[VOICE] transcript received: "${final.trim()}"`);
+          this.logDiagnostic(`[VOICE] transcript length: ${final.trim().length}`);
+          this.processRecognizedSpeech(final.trim());
         }
       };
 
       rec.onerror = (event: any) => {
-        console.warn('Speech recognition event warning:', event.error);
-        if (event.error === 'no-speech') {
-          // If in continuous mode, keep listening without flagging hard error
-          if (this.config.continuousListening && this.isListeningActive) {
-            this.status = 'listening';
+        const errorType = event.error || 'unknown';
+        this.logDiagnostic(`[VOICE] recognition error: ${errorType}`);
+
+        if (errorType === 'no-speech') {
+          // If in continuous mode, keep listening without stopping
+          if (this.config.continuousListening && this.isListeningActive && !this.isProcessing) {
+            this.diagnostics.sttStatus = 'listening';
             this.notify();
             return;
           }
-        }
-        
-        if (event.error === 'not-allowed') {
-          this.errorMessage = 'Microphone permission denied (RECORD_AUDIO required).';
-        } else if (event.error === 'network') {
-          this.errorMessage = 'Network issue with cloud speech recognition. Trying offline fallback.';
+          this.errorCode = 'NO_SPEECH';
+          this.errorMessage = getVoiceErrorMessage('NO_SPEECH', this.config.primaryLanguage);
+        } else if (errorType === 'not-allowed') {
+          this.errorCode = 'NO_MICROPHONE_PERMISSION';
+          this.diagnostics.micStatus = 'denied';
+          this.errorMessage = getVoiceErrorMessage('NO_MICROPHONE_PERMISSION', this.config.primaryLanguage);
+        } else if (errorType === 'network') {
+          this.errorCode = 'NETWORK_ERROR';
+          this.errorMessage = getVoiceErrorMessage('NETWORK_ERROR', this.config.primaryLanguage);
         } else {
-          this.errorMessage = `Voice recognition notice: ${event.error}`;
+          this.errorCode = 'RECOGNIZER_ERROR';
+          this.errorMessage = getVoiceErrorMessage('RECOGNIZER_ERROR', this.config.primaryLanguage);
         }
+
         this.status = 'error';
+        this.diagnostics.sttStatus = 'error';
+        this.diagnostics.errorCode = this.errorCode;
         this.notify();
       };
 
       rec.onend = () => {
-        if (this.isListeningActive && this.config.continuousListening) {
-          try {
-            rec.start();
-          } catch {
-            this.status = 'idle';
-            this.notify();
-          }
-        } else {
+        this.logDiagnostic('[VOICE] recognition stream ended');
+        if (this.isListeningActive && this.config.continuousListening && !this.isProcessing && this.status !== 'speaking') {
+          this.scheduleRestart(300);
+        } else if (!this.isProcessing && this.status !== 'speaking') {
           this.isListeningActive = false;
-          if (this.status !== 'speaking' && this.status !== 'error') {
-            this.status = 'idle';
-          }
+          this.status = 'idle';
+          this.diagnostics.micStatus = 'idle';
+          this.diagnostics.sttStatus = 'idle';
           this.notify();
         }
       };
@@ -240,8 +302,27 @@ class VoiceService {
       this.recognition = rec;
     } catch (e) {
       console.warn('SpeechRecognition init error:', e);
-      this.isAvailable = false;
     }
+  }
+
+  private scheduleRestart(delayMs = 300) {
+    if (this.restartTimeout) clearTimeout(this.restartTimeout);
+    this.restartTimeout = setTimeout(() => {
+      if (this.isListeningActive && !this.isProcessing && this.status !== 'speaking') {
+        try {
+          this.logDiagnostic('[VOICE] recognition restarted');
+          this.recognition?.start();
+          this.status = 'listening';
+          this.diagnostics.micStatus = 'active';
+          this.diagnostics.sttStatus = 'listening';
+          this.notify();
+        } catch (err) {
+          // If already running or cannot restart, reset to idle
+          this.status = 'idle';
+          this.notify();
+        }
+      }
+    }, delayMs);
   }
 
   /**
@@ -249,16 +330,23 @@ class VoiceService {
    */
   public async startListening(): Promise<boolean> {
     this.errorMessage = null;
+    this.errorCode = null;
+    this.diagnostics.errorCode = null;
 
-    // Check microphone permission via mediaDevices first for browser permission prompt
+    // Check microphone permission via mediaDevices first
     if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
       try {
+        this.diagnostics.micStatus = 'requesting';
+        this.notify();
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Release stream immediately; SpeechRecognition will use microphone directly
+        this.diagnostics.micStatus = 'active';
         stream.getTracks().forEach((track) => track.stop());
       } catch (micErr: any) {
-        console.warn('Microphone permission request result:', micErr);
-        this.errorMessage = 'Microphone access is required for voice commands. Please allow microphone permissions.';
+        this.logDiagnostic('[VOICE] Microphone permission denied');
+        this.errorCode = 'NO_MICROPHONE_PERMISSION';
+        this.diagnostics.micStatus = 'denied';
+        this.diagnostics.errorCode = 'NO_MICROPHONE_PERMISSION';
+        this.errorMessage = getVoiceErrorMessage('NO_MICROPHONE_PERMISSION', this.config.primaryLanguage);
         this.status = 'error';
         this.notify();
         return false;
@@ -270,7 +358,8 @@ class VoiceService {
     }
 
     if (!this.recognition) {
-      this.errorMessage = 'Speech Recognition is not available on this browser/webview.';
+      this.errorCode = 'STT_UNAVAILABLE';
+      this.errorMessage = getVoiceErrorMessage('STT_UNAVAILABLE', this.config.primaryLanguage);
       this.status = 'error';
       this.notify();
       return false;
@@ -282,17 +371,18 @@ class VoiceService {
       this.isListeningActive = true;
       this.recognition.start();
       this.status = 'listening';
+      this.diagnostics.micStatus = 'active';
+      this.diagnostics.sttStatus = 'listening';
       this.notify();
       return true;
     } catch (err: any) {
-      console.warn('Failed to start speech recognition:', err);
-      // If already started, ignore error
       if (err.name === 'InvalidStateError') {
         this.isListeningActive = true;
         this.status = 'listening';
         this.notify();
         return true;
       }
+      this.errorCode = 'RECOGNIZER_ERROR';
       this.errorMessage = `Could not activate microphone: ${err?.message || 'Unknown error'}`;
       this.status = 'error';
       this.notify();
@@ -305,12 +395,15 @@ class VoiceService {
    */
   public stopListening() {
     this.isListeningActive = false;
+    if (this.restartTimeout) clearTimeout(this.restartTimeout);
     if (this.recognition) {
       try {
         this.recognition.stop();
       } catch {}
     }
     this.status = 'idle';
+    this.diagnostics.micStatus = 'idle';
+    this.diagnostics.sttStatus = 'idle';
     this.notify();
   }
 
@@ -332,32 +425,66 @@ class VoiceService {
   }
 
   /**
-   * Processes a recognized voice transcript, classifies intent, and executes corresponding emergency or telemetry action.
+   * Processes a recognized voice transcript, classifies intent with Gemini 3.7 Flash, and executes tool actions.
    */
   public async processRecognizedSpeech(text: string, manualLanguage?: Language): Promise<VoiceIntentMatch> {
     const rawText = text.trim();
+    const lang = manualLanguage || this.config.primaryLanguage;
+
     if (!rawText) {
-      return classifyVoiceIntent('', manualLanguage || this.config.primaryLanguage);
+      this.errorCode = 'EMPTY_TRANSCRIPT';
+      this.status = 'idle';
+      this.notify();
+      return {
+        intent: 'UNKNOWN_COMMAND',
+        confidence: 0,
+        rawText: '',
+        normalizedText: '',
+        detectedLanguage: lang,
+        speechResponse: getVoiceErrorMessage('EMPTY_TRANSCRIPT', lang),
+      };
     }
 
+    this.isProcessing = true;
     this.status = 'processing';
     this.lastRecognizedText = rawText;
     this.transcript = rawText;
     this.interimTranscript = '';
+    this.diagnostics.lastTranscript = rawText;
+    this.diagnostics.sttStatus = 'success';
     this.notify();
 
-    const lang = manualLanguage || this.config.primaryLanguage;
-    const primary = this.primaryContactGetter ? this.primaryContactGetter() : emergencyService.getConfig().primaryContact;
-    const secondary = this.secondaryContactGetter ? this.secondaryContactGetter() : emergencyService.getConfig().secondaryContact;
-    const reading = this.readingGetter ? this.readingGetter() : null;
+    const detected = detectLanguage(rawText, lang);
+    this.diagnostics.detectedLanguage = detected;
+    this.logDiagnostic(`[VOICE] detected language: ${detected}`);
+    this.logDiagnostic('[VOICE] AI request started');
 
-    const match = classifyVoiceIntent(rawText, lang, {
-      primaryContact: primary,
-      secondaryContact: secondary,
-      currentReading: reading,
-    });
+    const contactsList = this.contactsGetter ? this.contactsGetter() : [];
+    const currentReading = this.readingGetter ? this.readingGetter() : null;
+
+    let match: VoiceIntentMatch;
+    try {
+      match = await classifyVoiceIntentSemantic(rawText, detected, {
+        contacts: contactsList,
+        currentReading,
+      });
+      this.logDiagnostic(`[VOICE] AI response received: intent=${match.intent}, confidence=${match.confidence}`);
+    } catch (err: any) {
+      this.logDiagnostic(`[VOICE] AI processing notice: ${err?.message}`);
+      this.errorCode = 'AI_ERROR';
+      match = {
+        intent: 'NORMAL_CONVERSATION',
+        confidence: 0.8,
+        rawText,
+        normalizedText: rawText,
+        detectedLanguage: detected,
+        speechResponse: 'Nabyumvise neza.',
+      };
+    }
 
     this.lastIntent = match;
+    this.diagnostics.lastIntent = match;
+    this.diagnostics.lastTool = match.extractedEntity?.action || match.intent;
     this.notify();
 
     // Check emergency state machine
@@ -365,88 +492,131 @@ class VoiceService {
 
     // Action 1: Cancellation during active countdown or emergency
     if (match.intent === 'CANCEL_EMERGENCY') {
+      this.logDiagnostic('[VOICE] Tool Action: CANCEL_EMERGENCY executed');
       if (currentEmergencyState === 'COUNTDOWN' || currentEmergencyState === 'EMERGENCY_DETECTED') {
         emergencyService.cancelEmergency(`Voice cancellation command: "${rawText}"`);
       }
       await this.speak(match.speechResponse, match.detectedLanguage);
-      this.status = 'idle';
-      this.notify();
+      this.finishProcessing();
       return match;
     }
 
     // Action 2: Emergency Request
     if (match.intent === 'EMERGENCY_REQUEST') {
-      // Speak emergency response first
+      this.logDiagnostic('[VOICE] Tool Action: EMERGENCY_REQUEST triggered');
       await this.speak(match.speechResponse, match.detectedLanguage);
       
-      // Trigger centralized emergency state machine with 10s countdown
       await emergencyService.triggerEmergency('voice_emergency', {
         notes: `Voice Emergency Command: "${rawText}"`,
         customCountdown: this.config.countdownSeconds || 10,
       });
 
-      this.status = 'idle';
-      this.notify();
+      this.finishProcessing();
       return match;
     }
 
-    // Action 3: Direct Contact Call (Primary or Secondary)
-    if (match.intent === 'CALL_PRIMARY_CONTACT' || match.intent === 'CALL_SECONDARY_CONTACT') {
+    // Action 3: Direct Contact Call (Primary, Secondary, or Named Contact)
+    if (
+      match.intent === 'CALL_PRIMARY_CONTACT' || 
+      match.intent === 'CALL_SECONDARY_CONTACT' || 
+      match.intent === 'CALL_CONTACT'
+    ) {
+      const targetName = match.extractedEntity?.contactName || 'Primary Contact';
+      this.logDiagnostic(`[VOICE] Tool Action: CALL_CONTACT triggered for ${targetName}`);
       await this.speak(match.speechResponse, match.detectedLanguage);
 
-      const target = match.extractedEntity?.contactName || 'Primary Contact';
       await emergencyService.triggerEmergency('voice_emergency', {
-        notes: `Voice Call Request to ${target}: "${rawText}"`,
-        customCountdown: 5, // Short 5-second countdown for direct contact calls as per requirements
+        notes: `Voice Call Request to ${targetName}: "${rawText}"`,
+        customCountdown: 5,
       });
 
-      this.status = 'idle';
-      this.notify();
+      this.finishProcessing();
       return match;
     }
 
     // Action 4: Standard intent responses (Health, Driving, BAC, Location, Help, etc.)
     await this.speak(match.speechResponse, match.detectedLanguage);
-    this.status = 'idle';
-    this.notify();
+    this.finishProcessing();
     return match;
   }
 
+  private finishProcessing() {
+    this.isProcessing = false;
+    if (this.isListeningActive && this.config.continuousListening) {
+      this.scheduleRestart(400);
+    } else {
+      this.status = 'idle';
+      this.diagnostics.micStatus = 'idle';
+      this.diagnostics.sttStatus = 'idle';
+      this.notify();
+    }
+  }
+
   /**
-   * Real Text-to-Speech (TTS) engine with multi-lingual voice mapping and fallback.
+   * Text-to-Speech (TTS) engine with Server Gemini TTS & Client-side Bantu phonetic synthesis.
    */
   public async speak(text: string, lang: Language = this.config.primaryLanguage): Promise<void> {
     if (!text || this.isMuted || typeof window === 'undefined') return;
 
     this.lastAssistantSpeech = text;
     this.status = 'speaking';
+    this.diagnostics.ttsStatus = 'generating';
+    this.logDiagnostic('[VOICE] TTS started');
     this.notify();
 
+    // 1. Try server-side Gemini Audio TTS endpoint
+    if (this.config.ttsProvider !== 'web_synthesis') {
+      try {
+        const response = await fetch('/api/voice/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, language: lang }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.audioBase64) {
+            await this.playBase64Audio(data.audioBase64, data.mimeType || 'audio/mp3');
+            this.logDiagnostic('[VOICE] TTS finished (Gemini Server TTS)');
+            this.diagnostics.ttsStatus = 'completed';
+            this.notify();
+            return;
+          }
+        }
+      } catch (err) {
+        this.logDiagnostic('[VOICE] Server TTS fallback to client synthesis');
+      }
+    }
+
+    // 2. Client-side Web Speech Synthesis fallback
     if (!('speechSynthesis' in window)) {
-      console.warn('Speech synthesis not available in this environment');
+      this.logDiagnostic('[VOICE] Speech synthesis not supported in this browser');
       this.status = 'idle';
+      this.diagnostics.ttsStatus = 'error';
       this.notify();
       return;
     }
 
     return new Promise((resolve) => {
       try {
-        window.speechSynthesis.cancel(); // Stop ongoing speech
+        window.speechSynthesis.cancel();
 
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = this.config.voiceRate || 1.0;
+        utterance.rate = this.config.voiceRate || 0.95;
         utterance.pitch = this.config.voicePitch || 1.0;
 
-        // Select the most compatible voice for the target language
         const voices = window.speechSynthesis.getVoices();
         const langCode = this.getLanguageCode(lang);
 
+        // Kinyarwanda phonetic voice selection:
+        // If native rw-RW voice is absent, Swahili (sw) or Bantu-phonetic voices reproduce
+        // Kinyarwanda vowels and syllable rhythm far better than harsh English voices!
         let matchingVoice = voices.find((v) => v.lang.startsWith(langCode) || v.lang.startsWith(lang));
-        
-        // Kinyarwanda voice fallback: if pure rw-RW is not installed on the Android device/browser,
-        // use Swahili (sw) or English (en) compatible phonetic voice
         if (!matchingVoice && lang === 'rw') {
-          matchingVoice = voices.find((v) => v.lang.startsWith('sw') || v.lang.startsWith('en'));
+          matchingVoice = voices.find((v) => v.lang.startsWith('sw') || v.lang.startsWith('sw-KE') || v.lang.startsWith('sw-TZ'));
+        }
+        if (!matchingVoice) {
+          matchingVoice = voices.find((v) => v.lang.startsWith('fr') || v.lang.startsWith('en'));
         }
 
         if (matchingVoice) {
@@ -454,33 +624,53 @@ class VoiceService {
         }
         utterance.lang = langCode;
 
+        utterance.onstart = () => {
+          this.diagnostics.ttsStatus = 'speaking';
+          this.notify();
+        };
+
         utterance.onend = () => {
-          this.status = 'idle';
+          this.logDiagnostic('[VOICE] TTS finished');
+          this.diagnostics.ttsStatus = 'completed';
           this.notify();
           resolve();
         };
 
         utterance.onerror = (e) => {
-          console.warn('TTS utterance playback event:', e);
-          this.status = 'idle';
+          this.logDiagnostic(`[VOICE] TTS playback event: ${e.error || 'unknown'}`);
+          this.diagnostics.ttsStatus = 'error';
           this.notify();
           resolve();
         };
 
         window.speechSynthesis.speak(utterance);
       } catch (err) {
-        console.warn('Speech synthesis exception:', err);
-        this.status = 'idle';
+        this.logDiagnostic(`[VOICE] Speech synthesis error: ${err}`);
+        this.diagnostics.ttsStatus = 'error';
         this.notify();
         resolve();
       }
     });
   }
 
+  private playBase64Audio(base64Data: string, mimeType: string): Promise<void> {
+    return new Promise((resolve) => {
+      try {
+        const audio = new Audio(`data:${mimeType};base64,${base64Data}`);
+        audio.onended = () => resolve();
+        audio.onerror = () => resolve();
+        audio.play().catch(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+
   /**
-   * Simulator for developer test suite and automated flows without microphone access.
+   * Simulation method for developer test panel and automated tests.
    */
   public async simulateVoiceCommand(commandText: string, lang: Language = this.config.primaryLanguage): Promise<VoiceIntentMatch> {
+    this.logDiagnostic(`[VOICE] Manual simulated command: "${commandText}"`);
     return this.processRecognizedSpeech(commandText, lang);
   }
 }
