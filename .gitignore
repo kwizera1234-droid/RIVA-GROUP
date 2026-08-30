@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local/private files
+local.properties
+android/app/google-services.json
+build-error.txt
+APK/
