@@ -1,0 +1,29 @@
+
+> react-example@0.0.0 build
+> vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 4 modules transformed.
+✗ Build failed in 296ms
+error during build:
+[vite:esbuild] Transform failed with 1 error:
+/workspaces/soberwatch-_newversion/src/App.tsx:673:0: ERROR: Unterminated string literal
+file: /workspaces/soberwatch-_newversion/src/App.tsx:673:0
+
+Unterminated string literal
+671|  }
+672|  ```
+673|  
+   |  ^
+
+    at failureErrorWithLog (/workspaces/soberwatch-_newversion/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js:1467:15)
+    at /workspaces/soberwatch-_newversion/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js:736:50
+    at responseCallbacks.<computed> (/workspaces/soberwatch-_newversion/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js:603:9)
+    at handleIncomingPacket (/workspaces/soberwatch-_newversion/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js:658:12)
+    at Socket.readFromStdout (/workspaces/soberwatch-_newversion/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js:581:7)
+    at Socket.emit (node:events:508:28)
+    at addChunk (node:internal/streams/readable:563:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:514:3)
+    at Readable.push (node:internal/streams/readable:394:5)
+    at Pipe.onStreamRead (node:internal/stream_base_commons:189:23)
