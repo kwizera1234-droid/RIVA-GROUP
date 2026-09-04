@@ -2295,3 +2295,36 @@ app.listen(
   }
 );
 
+
+setTimeout(async () => {
+  try {
+    const response = await fetch("https://api.circuitnotion.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": "Bearer " + (process.env.SOBERWATCH_API_KEY || "")
+      },
+      body: JSON.stringify({
+        model: "circuit-2-turbo",
+        messages: [{ role: "user", content: "Muraho" }],
+        max_tokens: 20,
+        temperature: 0.2
+      })
+    });
+
+    console.log("CIRCUITNOTION_RENDER_TEST STATUS:", response.status);
+    console.log("CIRCUITNOTION_RENDER_TEST TYPE:", response.headers.get("content-type") || "unknown");
+
+    if (response.ok) {
+      const data = await response.json();
+      console.log("CIRCUITNOTION_RENDER_TEST SUCCESS: API irakora.");
+      console.log("CIRCUITNOTION_RENDER_TEST MODEL:", data.model || "unknown");
+    } else {
+      const text = await response.text();
+      console.log("CIRCUITNOTION_RENDER_TEST BODY:", text.slice(0, 180).replace(/\s+/g, " "));
+    }
+  } catch (error) {
+    console.log("CIRCUITNOTION_RENDER_TEST ERROR:", error.message);
+  }
+}, 5000);
