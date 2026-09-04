@@ -2034,7 +2034,7 @@ app.post(
         message:
           "AI analysis is temporarily unavailable",
         code:
-          "GEMINI_UNAVAILABLE",
+          "AI_ANALYSIS_UNAVAILABLE",
       });
     }
   }
