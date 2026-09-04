@@ -36,7 +36,13 @@ let db = null;
 let firebaseReady = false;
 
 try {
-    const serviceAccount = require("./firebase-backend/firebase-service-account.json");
+  let serviceAccount;
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  } else {
+    serviceAccount = require("./firebase-backend/firebase-service-account.json");
+  }
 
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
