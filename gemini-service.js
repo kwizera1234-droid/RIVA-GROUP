@@ -1,16 +1,5 @@
-const { GoogleGenAI } = require("@google/genai");
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-3.5-flash";
-
-let ai = null;
-
-if (GEMINI_API_KEY) {
-  ai = new GoogleGenAI({
-    apiKey: GEMINI_API_KEY,
-  });
-}
+const OPENROUTER_API_KEY = process.env.SOBERWATCH_API_KEY1 || "";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
 function buildPrompt(telemetry) {
   return `
@@ -122,62 +111,88 @@ Do not use unnecessary medical jargon.
 }
 
 async function analyzeTelemetry(telemetry) {
-  if (!ai) {
+  if (!OPENROUTER_API_KEY) {
     return {
       success: false,
       available: false,
-      message: "Gemini AI is not configured",
+      message: "OpenRouter API key is not configured",
     };
   }
 
   try {
-    const result =
-      await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: buildPrompt(telemetry),
-      });
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [{ role: "user", content: buildPrompt(telemetry) }],
+        temperature: 0.2,
+        max_tokens: 600,
+      }),
+    });
 
-    const text =
-      result?.text ||
-      result?.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || "")
-        .join("") ||
-      "";
-
-    if (!text.trim()) {
+    const responseText = await response.text();
+    let data;
+    try {
+      data = responseText ? JSON.parse(responseText) : {};
+    } catch {
       return {
         success: false,
         available: true,
-        message: "Gemini returned an empty response",
+        message: "OpenRouter returned an invalid response",
+      };
+    }
+
+    if (!response.ok) {
+      const errorText = data?.error?.message || data?.message || responseText;
+      return {
+        success: false,
+        available: true,
+        message: errorText || "OpenRouter AI temporarily unavailable",
+      };
+    }
+
+    const message = data?.choices?.[0]?.message || {};
+    const content = typeof message.content === "string"
+      ? message.content
+      : Array.isArray(message.content)
+        ? message.content
+            .filter((part) => part?.type === "text")
+            .map((part) => part.text)
+            .join(" ")
+        : "";
+
+    const text = String(content || "").trim();
+    if (!text) {
+      return {
+        success: false,
+        available: true,
+        message: "OpenRouter returned an empty response",
       };
     }
 
     return {
       success: true,
       available: true,
-      model: GEMINI_MODEL,
-      analysis: text.trim(),
+      model: OPENROUTER_MODEL,
+      analysis: text,
       generatedAt: Date.now(),
     };
   } catch (error) {
-    console.error(
-      "GEMINI ANALYSIS ERROR:",
-      error?.message || error
-    );
-
+    console.error("OPENROUTER ANALYSIS ERROR:", error?.message || error);
     return {
       success: false,
       available: true,
-      message: "Gemini AI temporarily unavailable",
-      error:
-        process.env.NODE_ENV === "production"
-          ? undefined
-          : error?.message,
+      message: "OpenRouter AI temporarily unavailable",
+      error: process.env.NODE_ENV === "production" ? undefined : error?.message,
     };
   }
 }
 
 module.exports = {
   analyzeTelemetry,
-  GEMINI_MODEL,
+  OPENROUTER_MODEL,
 };

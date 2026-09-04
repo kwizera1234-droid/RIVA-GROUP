@@ -1,53 +1,59 @@
-const { GoogleGenAI } = require("@google/genai");
+const OPENROUTER_API_KEY = process.env.SOBERWATCH_API_KEY1 || "";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-const GEMINI_MODEL =
-  process.env.GEMINI_VOICE_MODEL ||
-  "gemini-3.1-flash-lite";
+function isFreshnessRequest(text) {
+  const value = String(text || "").toLowerCase();
+  return /(latest|current|today|now|weather|news|restaurant|near me|nearby|price|prices|recent|this week|tomorrow|upcoming|today's|current information|what is happening|what's happening|where is|how much|laws|traffic)/i.test(value);
+}
 
-const ai = GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
-  : null;
-
-const tools = [
-  {
-    functionDeclarations: [
-      {
+function buildOpenRouterTools(includeSearch) {
+  const functionTools = [
+    {
+      type: "function",
+      function: {
         name: "get_latest_health",
         description: "Get the user's latest SoberWatch health and alcohol telemetry.",
-        parameters: { type: "object", properties: {} }
+        parameters: { type: "object", properties: {} },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "get_recent_readings",
         description: "Get recent SoberWatch sensor readings and trends.",
         parameters: {
           type: "object",
           properties: {
-            limit: {
-              type: "number",
-              description: "Number of readings requested, maximum 30."
-            }
-          }
-        }
+            limit: { type: "number", description: "Number of readings requested, maximum 30." },
+          },
+        },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "get_location",
         description: "Request the user's current device location.",
-        parameters: { type: "object", properties: {} }
+        parameters: { type: "object", properties: {} },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "find_contact",
         description: "Find one of the user's saved contacts.",
         parameters: {
           type: "object",
-          properties: {
-            name: { type: "string", description: "Contact name." }
-          },
-          required: ["name"]
-        }
+          properties: { name: { type: "string", description: "Contact name." } },
+          required: ["name"],
+        },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "call_contact",
         description: "Request a real phone call to a saved contact.",
         parameters: {
@@ -55,150 +61,209 @@ const tools = [
           properties: {
             name: { type: "string", description: "Contact name." },
             phone: { type: "string", description: "Phone number if known." },
-            reason: { type: "string", description: "Reason for the call." }
+            reason: { type: "string", description: "Reason for the call." },
           },
-          required: ["name"]
-        }
+          required: ["name"],
+        },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "share_location",
         description: "Request sharing the user's current location with a contact.",
         parameters: {
           type: "object",
           properties: {
             contactName: { type: "string", description: "Recipient name." },
-            reason: { type: "string", description: "Reason for sharing." }
+            reason: { type: "string", description: "Reason for sharing." },
           },
-          required: ["contactName"]
-        }
+          required: ["contactName"],
+        },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "emergency_alert",
         description: "Request a SoberWatch emergency alert.",
         parameters: {
           type: "object",
           properties: {
             reason: { type: "string", description: "Emergency reason." },
-            severity: {
-              type: "string",
-              enum: ["low", "medium", "high", "critical"]
-            }
+            severity: { type: "string", enum: ["low", "medium", "high", "critical"] },
           },
-          required: ["reason", "severity"]
-        }
+          required: ["reason", "severity"],
+        },
       },
-      {
+    },
+    {
+      type: "function",
+      function: {
         name: "create_report",
         description: "Request a SoberWatch report.",
         parameters: {
           type: "object",
           properties: {
-            type: {
-              type: "string",
-              enum: ["health", "driving", "alcohol", "weekly", "general"]
-            }
+            type: { type: "string", enum: ["health", "driving", "alcohol", "weekly", "general"] },
           },
-          required: ["type"]
-        }
-      }
-    ]
+          required: ["type"],
+        },
+      },
+    },
+  ];
+
+  const tools = [...functionTools];
+  if (includeSearch) {
+    tools.unshift({ type: "openrouter:web_search" });
   }
-];
+  return tools;
+}
 
 function buildSystemInstruction({ language, telemetry, location, profile }) {
-  return `
-You are SoberWatch AI, a general-purpose AI assistant integrated into an Android application.
+  return `You are SoberWatch AI, a highly capable natural multilingual conversational assistant.
 
-You are NOT limited to health.
+Understand the users intended meaning, not isolated keywords. Understand natural Kinyarwanda, English, French, Kiswahili, slang, jokes, sarcasm, idioms, incomplete speech, ASR mistakes, and mixed-language conversation. Do not treat jokes, hypotheticals, stories, or figurative language as real device commands.
 
-You can help with:
-- normal conversation
-- general knowledge
-- technology
-- school and work
-- translation
-- current information
-- weather and places
-- restaurants and services
-- music-related requests
-- planning and schedules
-- contacts and phone actions
-- location
-- SoberWatch health and driving information
+Use conversation history to understand follow-ups and previous context. Answer the actual question naturally instead of forcing everything into SoberWatch. Do not give canned responses. If the user is joking, respond naturally. If meaning is genuinely unclear, ask one short clarification in the same language.
 
-LANGUAGES:
-Understand and respond naturally in:
-- Kinyarwanda
-- English
-- French
-- Kiswahili
-- mixed languages
+Reply in the users dominant language. For Kinyarwanda, use fluent natural Kinyarwanda, not awkward literal translations.
 
-If the user speaks Kinyarwanda, respond in natural Kinyarwanda.
-If English, respond in English.
-If French, respond in French.
-If Kiswahili, respond in Kiswahili.
-For mixed language, use the dominant language naturally.
+Tools can perform real actions. Only use consequential Android actions when the users intention is clear. Never call, message, share location, or trigger emergency actions merely because those words were mentioned. Never claim an action completed unless Android confirms it.
 
-CONVERSATION:
-Maintain the context of the conversation.
-Do not ask again for information already provided.
-Be natural and helpful.
+Never invent telemetry, health readings, contacts, or location. SoberWatch readings are device measurements, not automatically a medical diagnosis.
 
-SOBERWATCH:
-Use SoberWatch tools when they are useful.
-Never invent telemetry values.
-BAC is a sensor reading, not a diagnosis.
+Telemetry: ${JSON.stringify(telemetry || {}, null, 2)}
+Location: ${JSON.stringify(location || {}, null, 2)}
+User profile: ${JSON.stringify(profile || {}, null, 2)}
+Requested language: ${language || 'auto'}
 
-Current telemetry:
-${JSON.stringify(telemetry || {}, null, 2)}
-
-Current location:
-${JSON.stringify(location || {}, null, 2)}
-
-User profile:
-${JSON.stringify(profile || {}, null, 2)}
-
-ACTIONS:
-You may request actions using tools.
-Android is responsible for actually executing phone calls, location sharing, and emergency actions.
-Never claim that a real action happened unless Android confirms execution.
-
-VOICE:
-Keep normal voice answers concise and natural unless the user asks for details.
-`;
+Be warm, intelligent, direct, and concise. Give simple answers to simple questions and clear explanations to complex questions. Never invent facts.`;
 }
 
-function extractText(response) {
-  if (response?.text) return response.text.trim();
+function normalizeOpenRouterMessages(history = []) {
+  const safeHistory = Array.isArray(history) ? history.slice(-12) : [];
+  const messages = [];
 
-  const parts = response?.candidates?.[0]?.content?.parts || [];
-
-  return parts
-    .filter(part => part.text)
-    .map(part => part.text)
-    .join("")
-    .trim();
-}
-
-function extractFunctionCalls(response) {
-  if (Array.isArray(response?.functionCalls)) {
-    return response.functionCalls;
+  for (const message of safeHistory) {
+    const role = String(message?.role || "user").toLowerCase();
+    const content = String(message?.content || message?.text || "").trim();
+    if (!content) continue;
+    if (role === "assistant") {
+      messages.push({ role: "assistant", content });
+    } else {
+      messages.push({ role: "user", content });
+    }
   }
 
-  const parts = response?.candidates?.[0]?.content?.parts || [];
-
-  return parts
-    .filter(part => part.functionCall)
-    .map(part => part.functionCall);
+  return messages;
 }
 
-function convertFunctionCalls(functionCalls) {
-  return functionCalls.map(call => ({
-    name: call.name,
-    args: call.args || {},
-    requiresAndroidExecution: true
-  }));
+function extractOpenRouterReply(message) {
+  if (!message) return "";
+  if (typeof message.content === "string") return message.content.trim();
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((part) => typeof part === "object" && part?.type === "text" && part?.text)
+      .map((part) => part.text)
+      .join(" ")
+      .trim();
+  }
+  return "";
+}
+
+function extractToolCalls(message) {
+  const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  return toolCalls
+    .filter((call) => call?.type === "function" && call.function)
+    .map((call) => {
+      const args = (() => {
+        try {
+          return JSON.parse(call.function.arguments || "{}") || {};
+        } catch {
+          return {};
+        }
+      })();
+      return {
+        name: call.function.name,
+        args,
+      };
+    });
+}
+
+function extractOpenRouterSources(data) {
+  const sources = Array.isArray(data?.sources) ? data.sources : [];
+  if (sources.length) return sources;
+  if (Array.isArray(data?.choices?.[0]?.message?.sources)) return data.choices[0].message.sources;
+  return [];
+}
+
+async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3 }) {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error("OpenRouter API key is not configured on the server.");
+  }
+
+  const response = await fetch(OPENROUTER_BASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "HTTP-Referer": process.env.APP_URL || "https://soberwatch.app",
+      "X-Title": "SoberWatch",
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...messages,
+      ],
+      tools: tools && tools.length ? tools : undefined,
+      temperature,
+      max_tokens: 500,
+    }),
+  });
+
+  const responseText = await response.text();
+  let data;
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    throw new Error(`OpenRouter returned invalid JSON: ${responseText.slice(0, 200)}`);
+  }
+
+  if (!response.ok) {
+    const errorText = data?.error?.message || data?.message || responseText;
+    throw new Error(errorText || `OpenRouter request failed with HTTP ${response.status}`);
+  }
+
+  const choice = data?.choices?.[0];
+  const message = choice?.message || {};
+  return {
+    message,
+    reply: extractOpenRouterReply(message),
+    toolCalls: extractToolCalls(message),
+    sources: extractOpenRouterSources(data),
+    raw: data,
+  };
+}
+
+async function callOllama(prompt) {
+  const response = await fetch("http://127.0.0.1:11434/api/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL || "llama3.2:3b",
+      options: { temperature: 0.2, num_predict: 60 },
+      prompt: `You are SoberWatch AI. ${prompt}`,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Ollama request failed: ${response.status}`);
+  const data = await response.json();
+  return data.response || "";
 }
 
 async function chatWithAssistant({
@@ -207,101 +272,78 @@ async function chatWithAssistant({
   telemetry,
   location,
   profile,
-  history = []
+  history = [],
+  sessionId = null,
+  userId = null,
 }) {
-  if (!ai) {
-    return {
-      success: false,
-      available: false,
-      reply: "Gemini AI ntabwo yashyizweho kuri server.",
-      language: language || "auto",
-      actions: []
-    };
-  }
+  const safeTranscript = String(transcript || "").trim();
 
-  if (!transcript || !String(transcript).trim()) {
+  if (!safeTranscript) {
     return {
       success: false,
       available: true,
       reply: "Nta butumwa numvise. Ongera umbwire.",
       language: language || "auto",
-      actions: []
+      actions: [],
+      sources: [],
     };
   }
 
-  const safeHistory = Array.isArray(history)
-    ? history.slice(-12)
-    : [];
+  const systemPrompt = buildSystemInstruction({ language, telemetry, location, profile });
+  const messages = normalizeOpenRouterMessages(history);
+  messages.push({ role: "user", content: safeTranscript });
 
-  const conversation = [];
-
-  for (const message of safeHistory) {
-    if (!message?.text) continue;
-
-    conversation.push({
-      role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: String(message.text) }]
-    });
-  }
-
-  conversation.push({
-    role: "user",
-    parts: [{ text: String(transcript) }]
-  });
+  const hasSearch = isFreshnessRequest(safeTranscript) || isFreshnessRequest(JSON.stringify(history || []));
+  const tools = buildOpenRouterTools(hasSearch);
 
   try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: conversation,
-      config: {
-        systemInstruction: buildSystemInstruction({
-          language,
-          telemetry,
-          location,
-          profile
-        }),
-        tools
-      }
-    });
-
-    const functionCalls = extractFunctionCalls(response);
-    const reply = extractText(response);
+    const result = await callOpenRouter({ messages, tools, systemPrompt });
+    const reply = result.reply || "Ntabwo nabashije kubona igisubizo.";
+    const actions = result.toolCalls.map((call) => ({
+      name: call.name,
+      args: call.args || {},
+      requiresAndroidExecution: ["call_contact", "share_location", "emergency_alert"].includes(call.name),
+    }));
 
     return {
       success: true,
       available: true,
-      model: GEMINI_MODEL,
-      reply:
-        reply ||
-        (functionCalls.length
-          ? "Ngiye gutegura icyo gikorwa."
-          : "Ntabwo nabashije kubona igisubizo."),
+      model: OPENROUTER_MODEL,
+      reply,
       language: language || "auto",
-      actions: convertFunctionCalls(functionCalls),
-      sources: [],
-      memory: {
-        enabled: true,
-        conversationTurns: safeHistory.length + 1
-      },
-      generatedAt: Date.now()
+      actions,
+      sources: result.sources || [],
+      sessionId: sessionId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      memory: { enabled: true, conversationTurns: messages.length },
+      generatedAt: Date.now(),
     };
   } catch (error) {
     console.error("VOICE AI ERROR:", error?.message || error);
-
-    return {
-      success: false,
-      available: true,
-      reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
-      language: language || "auto",
-      actions: [],
-      error:
-        process.env.NODE_ENV === "development"
-          ? error?.message
-          : undefined
-    };
+    try {
+      const ollamaReply = (await callOllama(systemPrompt + "\nUser: " + safeTranscript)).trim();
+      return {
+        success: true,
+        available: true,
+        model: "ollama",
+        reply: ollamaReply || "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        generatedAt: Date.now(),
+      };
+    } catch (ollamaError) {
+      return {
+        success: false,
+        available: false,
+        reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        error: process.env.NODE_ENV === "development" ? (error?.message || ollamaError?.message) : undefined,
+      };
+    }
   }
 }
-
 
 async function generateProactiveGreeting({
   language = "rw",
@@ -310,120 +352,40 @@ async function generateProactiveGreeting({
   profile = {},
   history = [],
   sessionId = null,
-  userId = null
+  userId = null,
 } = {}) {
-  if (!ai) {
+  const context = `This is a proactive voice turn from SoberWatch. The user has not spoken yet. Respond naturally, briefly, and in the language requested. Current telemetry: ${JSON.stringify(telemetry || {}, null, 2)} Current location: ${JSON.stringify(location || {}, null, 2)} Recent conversation: ${JSON.stringify(Array.isArray(history) ? history.slice(-6) : [], null, 2)}`;
+
+  const systemPrompt = buildSystemInstruction({ language, telemetry, location, profile });
+  try {
+    const result = await callOpenRouter({
+      messages: [{ role: "user", content: context }],
+      tools: [],
+      systemPrompt,
+      temperature: 0.7,
+    });
+
+    const reply = result.reply || "Muraho. Ndi hano kugufasha igihe cyose ubikeneye.";
+
+    return {
+      success: true,
+      available: true,
+      model: OPENROUTER_MODEL,
+      reply,
+      language: language || "rw",
+      actions: [],
+      sources: result.sources || [],
+      generatedAt: Date.now(),
+    };
+  } catch (error) {
+    console.error("PROACTIVE VOICE AI ERROR:", error?.message || error);
     return {
       success: false,
       available: false,
       reply: "",
       language: language || "rw",
       actions: [],
-      error: "Gemini AI is not configured."
-    };
-  }
-
-  const safeHistory = Array.isArray(history)
-    ? history.slice(-12)
-    : [];
-
-  const context = `
-This is a proactive voice turn from SoberWatch.
-
-The user has NOT spoken yet.
-Do NOT pretend that the user said anything.
-Do NOT create a fake user message.
-You are initiating the conversation naturally.
-
-Your job is to decide whether there is something useful and natural to say right now.
-
-You may:
-- greet the user naturally
-- briefly check in
-- mention an important SoberWatch status when useful
-- mention a relevant driving/safety issue
-- start a normal conversation
-- ask a natural question
-- remain brief when there is nothing important
-
-Do not sound like a notification, robot, alarm, or canned script.
-Do not always use the same greeting.
-Do not say "How can I help you?" every time.
-Use the user's language naturally.
-If language is Kinyarwanda, use natural conversational Kinyarwanda.
-
-Current telemetry:
-${JSON.stringify(telemetry || {}, null, 2)}
-
-Current location:
-${JSON.stringify(location || {}, null, 2)}
-
-User profile:
-${JSON.stringify(profile || {}, null, 2)}
-
-Recent conversation:
-${JSON.stringify(safeHistory, null, 2)}
-
-Session ID:
-${String(sessionId || "")}
-
-User ID:
-${String(userId || "")}
-
-Generate ONLY the spoken response.
-`;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: context }]
-        }
-      ],
-      config: {
-        systemInstruction: buildSystemInstruction({
-          language,
-          telemetry,
-          location,
-          profile
-        }),
-        tools
-      }
-    });
-
-    const functionCalls = extractFunctionCalls(response);
-    const reply = extractText(response).trim();
-
-    return {
-      success: true,
-      available: true,
-      model: GEMINI_MODEL,
-      reply:
-        reply ||
-        "Muraho. Ndi hano kugufasha igihe cyose ubikeneye.",
-      language: language || "rw",
-      actions: convertFunctionCalls(functionCalls),
-      sources: [],
-      generatedAt: Date.now()
-    };
-  } catch (error) {
-    console.error(
-      "PROACTIVE VOICE AI ERROR:",
-      error?.message || error
-    );
-
-    return {
-      success: false,
-      available: true,
-      reply: "",
-      language: language || "rw",
-      actions: [],
-      error:
-        process.env.NODE_ENV === "development"
-          ? error?.message
-          : undefined
+      error: process.env.NODE_ENV === "development" ? error?.message : undefined,
     };
   }
 }
@@ -431,5 +393,5 @@ Generate ONLY the spoken response.
 module.exports = {
   chatWithAssistant,
   generateProactiveGreeting,
-  GEMINI_MODEL
+  OPENROUTER_MODEL,
 };
