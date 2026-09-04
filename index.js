@@ -4,7 +4,7 @@ const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
 const { analyzeTelemetry } = require("./gemini-service");
-const { chatWithAssistant } = require("./voice-ai-service");
+const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
 
 const app = express();
 
@@ -2089,6 +2089,61 @@ app.get(
 // ============================================================
 // VOICE AI CHAT
 // ============================================================
+
+
+app.post(
+  "/api/voice/proactive",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const body = req.body || {};
+
+    console.log(
+      `VOICE PROACTIVE: User ${req.firebaseUser.uid} - Language: ${body.language || "rw"}`
+    );
+
+    try {
+      const result = await generateProactiveGreeting({
+        language: body.language || "rw",
+        telemetry: body.telemetry || {},
+        location: body.location || {},
+        profile: body.profile || {},
+        history: Array.isArray(body.history) ? body.history : [],
+        sessionId: body.sessionId || null,
+        userId: req.firebaseUser.uid,
+      });
+
+      if (result && result.success === false) {
+        console.error("VOICE PROACTIVE: AI service failed", {
+          available: result.available,
+          error: result.error,
+        });
+
+        return res.status(result.available === false ? 503 : 502).json({
+          ...result,
+          status: "error",
+        });
+      }
+
+      console.log(
+        `VOICE PROACTIVE: Response generated (${result.reply?.length || 0} chars)`
+      );
+
+      return res.status(200).json(result);
+    } catch (error) {
+      console.error(
+        "VOICE PROACTIVE AI ERROR:",
+        error?.message || error
+      );
+
+      return res.status(503).json({
+        status: "error",
+        message:
+          "Proactive Voice AI is temporarily unavailable.",
+        code: "VOICE_PROACTIVE_UNAVAILABLE",
+      });
+    }
+  }
+);
 
 app.post(
   "/api/voice/chat",

@@ -302,7 +302,134 @@ async function chatWithAssistant({
   }
 }
 
+
+async function generateProactiveGreeting({
+  language = "rw",
+  telemetry = {},
+  location = {},
+  profile = {},
+  history = [],
+  sessionId = null,
+  userId = null
+} = {}) {
+  if (!ai) {
+    return {
+      success: false,
+      available: false,
+      reply: "",
+      language: language || "rw",
+      actions: [],
+      error: "Gemini AI is not configured."
+    };
+  }
+
+  const safeHistory = Array.isArray(history)
+    ? history.slice(-12)
+    : [];
+
+  const context = `
+This is a proactive voice turn from SoberWatch.
+
+The user has NOT spoken yet.
+Do NOT pretend that the user said anything.
+Do NOT create a fake user message.
+You are initiating the conversation naturally.
+
+Your job is to decide whether there is something useful and natural to say right now.
+
+You may:
+- greet the user naturally
+- briefly check in
+- mention an important SoberWatch status when useful
+- mention a relevant driving/safety issue
+- start a normal conversation
+- ask a natural question
+- remain brief when there is nothing important
+
+Do not sound like a notification, robot, alarm, or canned script.
+Do not always use the same greeting.
+Do not say "How can I help you?" every time.
+Use the user's language naturally.
+If language is Kinyarwanda, use natural conversational Kinyarwanda.
+
+Current telemetry:
+${JSON.stringify(telemetry || {}, null, 2)}
+
+Current location:
+${JSON.stringify(location || {}, null, 2)}
+
+User profile:
+${JSON.stringify(profile || {}, null, 2)}
+
+Recent conversation:
+${JSON.stringify(safeHistory, null, 2)}
+
+Session ID:
+${String(sessionId || "")}
+
+User ID:
+${String(userId || "")}
+
+Generate ONLY the spoken response.
+`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: context }]
+        }
+      ],
+      config: {
+        systemInstruction: buildSystemInstruction({
+          language,
+          telemetry,
+          location,
+          profile
+        }),
+        tools
+      }
+    });
+
+    const functionCalls = extractFunctionCalls(response);
+    const reply = extractText(response).trim();
+
+    return {
+      success: true,
+      available: true,
+      model: GEMINI_MODEL,
+      reply:
+        reply ||
+        "Muraho. Ndi hano kugufasha igihe cyose ubikeneye.",
+      language: language || "rw",
+      actions: convertFunctionCalls(functionCalls),
+      sources: [],
+      generatedAt: Date.now()
+    };
+  } catch (error) {
+    console.error(
+      "PROACTIVE VOICE AI ERROR:",
+      error?.message || error
+    );
+
+    return {
+      success: false,
+      available: true,
+      reply: "",
+      language: language || "rw",
+      actions: [],
+      error:
+        process.env.NODE_ENV === "development"
+          ? error?.message
+          : undefined
+    };
+  }
+}
+
 module.exports = {
   chatWithAssistant,
+  generateProactiveGreeting,
   GEMINI_MODEL
 };
