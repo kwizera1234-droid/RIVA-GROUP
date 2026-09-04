@@ -1,7 +1,10 @@
+require("dotenv").config();
 
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
+const { analyzeTelemetry } = require("./gemini-service");
+const { chatWithAssistant } = require("./voice-ai-service");
 
 const app = express();
 
@@ -33,15 +36,7 @@ let db = null;
 let firebaseReady = false;
 
 try {
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-    throw new Error(
-      "FIREBASE_SERVICE_ACCOUNT is missing"
-    );
-  }
-
-  const serviceAccount = JSON.parse(
-    process.env.FIREBASE_SERVICE_ACCOUNT
-  );
+    const serviceAccount = require("./firebase-backend/firebase-service-account.json");
 
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -133,6 +128,7 @@ const MAX_READINGS_LIMIT =
 const healthCache = new Map();
 const readingsCache = new Map();
 const latestTelemetryCache = new Map();
+const aiAnalysisCache = new Map();
 
 const telemetryLastAcceptedAt = new Map();
 const historyLastWrittenAt = new Map();
@@ -214,7 +210,9 @@ function normalizeTelemetry(body) {
   const tempCelsius =
     body.tempCelsius !== undefined
       ? body.tempCelsius
-      : body.temp;
+      : body.temperature !== undefined
+        ? body.temperature
+        : body.temp;
 
   const bacValue =
     Number(alcoholBac) || 0;
@@ -1884,6 +1882,158 @@ app.get(
   }
 );
 
+
+// ============================================================
+// GEMINI AI ANALYSIS
+// POST /api/ai/analyze
+//
+// IMPORTANT:
+// - Firebase authenticated users only
+// - Does NOT modify /uploadTelemetry
+// - Uses latest telemetry already available
+// - Uses short history for contextual analysis
+// ============================================================
+
+app.post(
+  "/api/ai/analyze",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const uid =
+      requireOwnUid(
+        req,
+        res
+      );
+
+    if (!uid) return;
+
+    if (!firebaseReady || !db) {
+      return res.status(503).json({
+        status: "error",
+        message:
+          "Firebase is not connected",
+      });
+    }
+
+    try {
+      let latest =
+        latestTelemetryCache.get(uid) ||
+        getCache(
+          healthCache,
+          uid
+        );
+
+      if (!latest) {
+        const userDoc =
+          await db
+            .collection("users")
+            .doc(uid)
+            .get();
+
+        if (!userDoc.exists) {
+          return res.status(404).json({
+            status: "error",
+            message:
+              "User not found",
+          });
+        }
+
+        const userData =
+          userDoc.data();
+
+        if (!userData.lastReading) {
+          return res.status(404).json({
+            status: "error",
+            message:
+              "No telemetry available for AI analysis",
+          });
+        }
+
+        latest =
+          userData.lastReading;
+      }
+
+      const cached =
+        aiAnalysisCache.get(uid);
+
+      if (
+        cached &&
+        Date.now() - cached.createdAt <
+          60000
+      ) {
+        return res.status(200).json({
+          status: "success",
+          source: "gemini-cache",
+          data: cached.data,
+        });
+      }
+
+      const snapshot =
+        await db
+          .collection("users")
+          .doc(uid)
+          .collection("readings")
+          .orderBy(
+            "timestamp",
+            "desc"
+          )
+          .limit(20)
+          .get();
+
+      const history =
+        snapshot.docs.map(
+          doc => ({
+            id: doc.id,
+            ...doc.data(),
+          })
+        );
+
+      const result =
+        await analyzeTelemetry(
+          latest,
+          history
+        );
+
+      const responseData = {
+        uid,
+        generatedAt:
+          Date.now(),
+        model:
+          result.model,
+        telemetry:
+          latest,
+        analysis:
+          result.analysis,
+      };
+
+      aiAnalysisCache.set(uid, {
+        createdAt: Date.now(),
+        data: responseData,
+      });
+
+      return res.status(200).json({
+        status: "success",
+        source: "gemini",
+        data: responseData,
+      });
+
+    } catch (error) {
+      console.error(
+        "GEMINI AI ANALYSIS ERROR:",
+        error?.message ||
+          error
+      );
+
+      return res.status(503).json({
+        status: "error",
+        message:
+          "AI analysis is temporarily unavailable",
+        code:
+          "GEMINI_UNAVAILABLE",
+      });
+    }
+  }
+);
+
 // ============================================================
 // HEALTH CHECK
 // ============================================================
@@ -1927,6 +2077,75 @@ app.get(
       timestamp:
         new Date().toISOString(),
     });
+  }
+);
+
+// ============================================================
+// VOICE AI CHAT
+// ============================================================
+
+app.post(
+  "/api/voice/chat",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const body = req.body || {};
+
+    const transcript = String(
+      body.transcript || ""
+    ).trim();
+
+    if (!transcript) {
+      return res.status(400).json({
+        status: "error",
+        message: "transcript is required",
+      });
+    }
+
+    console.log(`VOICE CHAT: User ${req.firebaseUser.uid} - Language: ${body.language || "auto"}`);
+
+    try {
+      const result = await chatWithAssistant({
+        transcript,
+        language: body.language || "auto",
+        telemetry: body.telemetry || {},
+        location: body.location || {},
+        profile: body.profile || {},
+        history: Array.isArray(body.history)
+          ? body.history
+          : [],
+        sessionId: body.sessionId || null,
+        userId: req.firebaseUser.uid,
+      });
+
+      if (result && result.success === false) {
+        console.error("VOICE CHAT: AI service failed", {
+          available: result.available,
+          error: result.error,
+        });
+        return res.status(result.available === false ? 503 : 502).json({
+          ...result,
+          status: "error",
+        });
+      }
+
+      if (result && result.reply) {
+        console.log(`VOICE CHAT: Response generated (${result.reply.length} chars)`);
+      }
+
+      return res.status(200).json(result);
+    } catch (error) {
+      console.error(
+        "VOICE AI CHAT ERROR:",
+        error?.message || error
+      );
+
+      return res.status(503).json({
+        status: "error",
+        message:
+          "Voice AI is temporarily unavailable. Please try again later.",
+        code: "VOICE_AI_UNAVAILABLE",
+      });
+    }
   }
 );
 
