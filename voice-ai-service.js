@@ -1,7 +1,10 @@
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || "https://soberwatch.app";
+const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || "SoberWatch";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
+const REQUEST_TIMEOUT_MS = 45000;
 
 const { searchCurrentInfo } = require("./search-service");
 
@@ -113,6 +116,24 @@ function buildOpenRouterTools(includeSearch) {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "open_page",
+        description:
+          "Navigate the SoberWatch app to a different page when the user asks to open a page or change screen. Allowed pages: dashboard, history, alerts, settings, voice, emergency-contacts, notifications.",
+        parameters: {
+          type: "object",
+          properties: {
+            page: {
+              type: "string",
+              enum: ["dashboard", "history", "alerts", "settings", "voice", "emergency-contacts", "notifications"],
+            },
+          },
+          required: ["page"],
+        },
+      },
+    },
   ];
 
   const tools = [...functionTools];
@@ -122,7 +143,7 @@ function buildOpenRouterTools(includeSearch) {
   return tools;
 }
 
-function buildSystemInstruction({ language, telemetry, location, profile }) {
+function buildSystemInstruction({ language, telemetry, location, profile, page, deviceStatus, alerts, readingsSummary }) {
   return `You are SoberWatch AI, a highly capable natural multilingual conversational assistant.
 
 Understand the users intended meaning, not isolated keywords. Understand natural Kinyarwanda, English, French, Kiswahili, slang, jokes, sarcasm, idioms, incomplete speech, ASR mistakes, and mixed-language conversation. Do not treat jokes, hypotheticals, stories, or figurative language as real device commands.
@@ -133,9 +154,14 @@ Reply in the users dominant language. For Kinyarwanda, use fluent natural Kinyar
 
 Tools can perform real actions. Only use consequential Android actions when the users intention is clear. Never call, message, share location, or trigger emergency actions merely because those words were mentioned. Never claim an action completed unless Android confirms it.
 
-Never invent telemetry, health readings, contacts, or location. SoberWatch readings are device measurements, not automatically a medical diagnosis.
+Never invent telemetry, health readings, contacts, or location. SoberWatch readings are device measurements, not automatically a medical diagnosis. If a telemetry field is missing or null, say it is unavailable — never fabricate a value.
+
+The page the user is currently viewing is: ${String(page || 'dashboard').toUpperCase()}. Use this page context to tailor your answer (e.g. device questions on DEVICE/dashboard, health questions on HEALTH/dashboard).
 
 Telemetry: ${JSON.stringify(telemetry || {}, null, 2)}
+Device status: ${JSON.stringify(deviceStatus || {}, null, 2)}
+Recent alerts: ${JSON.stringify(Array.isArray(alerts) ? alerts.slice(-8) : [], null, 2)}
+Recent readings summary: ${JSON.stringify(readingsSummary || {}, null, 2)}
 Location: ${JSON.stringify(location || {}, null, 2)}
 User profile: ${JSON.stringify(profile || {}, null, 2)}
 Requested language: ${language || 'auto'}
@@ -176,8 +202,19 @@ function extractOpenRouterReply(message) {
 
 function extractToolCalls(message) {
   const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  const allowedTools = new Set([
+    "get_latest_health",
+    "get_recent_readings",
+    "get_location",
+    "find_contact",
+    "call_contact",
+    "share_location",
+    "emergency_alert",
+    "create_report",
+    "open_page",
+  ]);
   return toolCalls
-    .filter((call) => call?.type === "function" && call.function)
+    .filter((call) => call?.type === "function" && call.function && allowedTools.has(call.function.name))
     .map((call) => {
       const args = (() => {
         try {
@@ -188,7 +225,7 @@ function extractToolCalls(message) {
       })();
       return {
         name: call.function.name,
-        args,
+        args: args && typeof args === "object" && !Array.isArray(args) ? args : {},
       };
     });
 }
@@ -210,8 +247,8 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "HTTP-Referer": process.env.APP_URL || "https://soberwatch.app",
-      "X-Title": "SoberWatch",
+      "HTTP-Referer": OPENROUTER_SITE_URL,
+      "X-Title": OPENROUTER_APP_NAME,
     },
     body: JSON.stringify({
       model: OPENROUTER_MODEL,
@@ -223,6 +260,7 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
       temperature,
       max_tokens: 500,
     }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const responseText = await response.text();
@@ -259,6 +297,10 @@ async function chatWithAssistant({
   history = [],
   sessionId = null,
   userId = null,
+  page = null,
+  deviceStatus = null,
+  alerts = [],
+  readingsSummary = null,
 }) {
   const safeTranscript = String(transcript || "").trim();
 
@@ -273,7 +315,7 @@ async function chatWithAssistant({
     };
   }
 
-  const systemPrompt = buildSystemInstruction({ language, telemetry, location, profile });
+  const systemPrompt = buildSystemInstruction({ language, telemetry, location, profile, page, deviceStatus, alerts, readingsSummary });
   const messages = normalizeOpenRouterMessages(history);
   messages.push({ role: "user", content: safeTranscript });
 
@@ -340,6 +382,7 @@ async function chatWithAssistant({
       reply,
       language: language || "auto",
       actions,
+      intent: mapIntentFromActions(actions) || inferIntentFromTranscript(safeTranscript),
       sources: mergedSources.slice(0, 8),
       sessionId: sessionId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       memory: { enabled: true, conversationTurns: messages.length },
@@ -411,3 +454,44 @@ module.exports = {
   generateProactiveGreeting,
   OPENROUTER_MODEL,
 };
+
+/**
+ * Maps an OpenRouter tool call to a normalized SoberWatch intent string so the
+ * frontend can execute the action through its own validated action layer.
+ */
+function mapIntentFromActions(actions) {
+  const names = (actions || []).map((a) => typeof a?.name === "string" ? a.name : "");
+  if (names.includes("emergency_alert")) return "EMERGENCY_REQUEST";
+  if (names.includes("call_contact")) {
+    return names.includes("share_location") ? "SHARE_LOCATION" : "CALL_CONTACT";
+  }
+  if (names.includes("share_location")) return "SHARE_LOCATION";
+  if (names.includes("open_page")) {
+    const openPage = (actions || []).find((a) => a?.name === "open_page");
+    const target = openPage?.args?.page || "dashboard";
+    if (target === "emergency-contacts") return "OPEN_EMERGENCY_CONTACTS";
+    return "OPEN_PAGE";
+  }
+  if (names.includes("get_latest_health") || names.includes("get_recent_readings")) {
+    return "CHECK_HEALTH";
+  }
+  return null;
+}
+
+const INTENT_TRANSCRIPT_MARKERS = [
+  { intent: "EMERGENCY_REQUEST", pattern: /(ubutabazi|ndababaye|nkeneye ubufasha|help me|emergency|kidnapp|accident|secours|urgence|saida|dharura)/i },
+  { intent: "CANCEL_EMERGENCY", pattern: /(hagarika|reka|nta kibazo|cancel|annuler|sitisha|ghairi)/i },
+  { intent: "CALL_CONTACT", pattern: /(hamagara|muhagare|mpamagarira|call\s+(mom|dad|mama|papa|john)|appeler|piga simu)/i },
+  { intent: "CHECK_DRIVING_READINESS", pattern: /(gutwara|drive|conduire|kuendesha|am i safe to drive|nshobora)/i },
+  { intent: "CHECK_ALCOHOL_STATUS", pattern: /(bac|inzoga|alcohol|alcool|pombe)/i },
+  { intent: "CHECK_HEALTH", pattern: /(reba uko meze|heart|umutima|health|sante|afya|ubuzima)/i },
+  { intent: "OPEN_PAGE", pattern: /(fungura|open|navigate|go to|ouvre|fungua)/i },
+];
+
+function inferIntentFromTranscript(text) {
+  const norm = String(text || "").toLowerCase();
+  for (const marker of INTENT_TRANSCRIPT_MARKERS) {
+    if (marker.pattern.test(norm)) return marker.intent;
+  }
+  return "NORMAL_CONVERSATION";
+}

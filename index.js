@@ -5,6 +5,7 @@ const admin = require("firebase-admin");
 const cors = require("cors");
 const { analyzeTelemetry } = require("./ai-analysis-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
+const { generateInsight } = require("./ai-insight-service");
 const { searchCurrentInfo } = require("./search-service");
 
 const app = express();
@@ -2290,6 +2291,186 @@ app.get(
         success: false,
         message: "Amakuru mashya ntaraboneka. Ongera ugerageze nyuma.",
         code: "SEARCH_UNAVAILABLE",
+      });
+    }
+  }
+);
+
+// ============================================================
+// AI RATE LIMITING (per user, in-memory)
+// ============================================================
+// Simple token-bucket guard so a single user cannot spam paid OpenRouter
+// calls. Resets when the server restarts; good enough for a safety app.
+
+const AI_RATE_LIMIT_KEY = "soberwatch_ai_rate";
+const AI_RATE_WINDOW_MS = 60000;
+
+function aiRateLimitPolicy(req, res, next) {
+  const uid = String(
+    (req.firebaseUser && req.firebaseUser.uid) ||
+      (req.body && req.body.uid) ||
+      req.ip ||
+      "anonymous"
+  );
+  const now = Date.now();
+  let buckets = {};
+  try {
+    const raw = global[AI_RATE_LIMIT_KEY];
+    if (raw) buckets = raw;
+  } catch {
+    buckets = {};
+  }
+
+  const bucket = buckets[uid] || { count: 0, resetAt: now + AI_RATE_WINDOW_MS };
+  if (now >= bucket.resetAt) {
+    bucket.count = 0;
+    bucket.resetAt = now + AI_RATE_WINDOW_MS;
+  }
+  bucket.count += 1;
+  buckets[uid] = bucket;
+  try {
+    global[AI_RATE_LIMIT_KEY] = buckets;
+  } catch {
+    buckets = {};
+  }
+
+  if (bucket.count > 8) {
+    return res.status(429).json({
+      status: "error",
+      message: "AI requests rate limited. Please wait a moment and try again.",
+      code: "AI_RATE_LIMITED",
+      retryAfterMs: Math.max(0, bucket.resetAt - now),
+    });
+  }
+
+  next();
+}
+
+// ============================================================
+// AI CHAT (OpenRouter through the backend)
+// ============================================================
+// Authenticated, validated, normalized OpenRouter conversation endpoint used
+// by the entire SoberWatch app. The OpenRouter API key never leaves this
+// server.
+
+app.post(
+  "/api/ai/chat",
+  requireFirebaseAuth,
+  aiRateLimitPolicy,
+  async (req, res) => {
+    const body = req.body || {};
+
+    const message = String(body.message || body.transcript || "").trim();
+    if (!message) {
+      return res.status(400).json({
+        status: "error",
+        message: "message is required",
+        code: "EMPTY_MESSAGE",
+      });
+    }
+    if (message.length > 4000) {
+      return res.status(400).json({
+        status: "error",
+        message: "message is too long",
+        code: "MESSAGE_TOO_LONG",
+      });
+    }
+
+    const context =
+      body.context && typeof body.context === "object" ? body.context : {};
+    const history = Array.isArray(body.history) ? body.history.slice(-14) : [];
+
+    console.log(
+      `AI CHAT: User ${req.firebaseUser.uid} - Language: ${body.language || "auto"} - Page: ${context.page || "dashboard"}`
+    );
+
+    try {
+      const result = await chatWithAssistant({
+        transcript: message,
+        language: body.language || "auto",
+        telemetry: context.telemetry || {},
+        location: context.location || {},
+        profile: context.profile || {},
+        history,
+        sessionId: body.sessionId || null,
+        userId: req.firebaseUser.uid,
+        page: context.page || "dashboard",
+        deviceStatus: context.deviceStatus || null,
+        alerts: Array.isArray(context.alerts) ? context.alerts : [],
+        readingsSummary: context.readingsSummary || null,
+      });
+
+      if (result && result.success === false) {
+        console.error("AI CHAT: service failed", {
+          available: result.available,
+          error: result.error,
+        });
+        return res.status(result.available === false ? 503 : 502).json({
+          ...result,
+          status: "error",
+        });
+      }
+
+      return res.status(200).json(result);
+    } catch (error) {
+      console.error("AI CHAT ERROR:", error?.message || error);
+      return res.status(503).json({
+        status: "error",
+        message: "AI ntabonetse ubu. Reba internet connection yawe.",
+        code: "AI_UNAVAILABLE",
+      });
+    }
+  }
+);
+
+// ============================================================
+// AI INSIGHT (OpenRouter through the backend)
+// ============================================================
+// Generates a real, data-driven safety insight for the AI Insight Card using
+// the actual current reading, recent readings, device status and alerts.
+
+app.post(
+  "/api/ai/insight",
+  requireFirebaseAuth,
+  aiRateLimitPolicy,
+  async (req, res) => {
+    const body = req.body || {};
+
+    try {
+      const insightResult = await generateInsight({
+        language: body.language || "rw",
+        currentReading: body.currentReading || null,
+        recentReadings: Array.isArray(body.recentReadings)
+          ? body.recentReadings
+          : [],
+        deviceStatus: body.deviceStatus || null,
+        alerts: Array.isArray(body.alerts) ? body.alerts : [],
+        page: body.page || "dashboard",
+      });
+
+      if (insightResult && insightResult.success === false) {
+        console.error("AI INSIGHT: service failed", {
+          available: insightResult.available,
+          error: insightResult.error,
+        });
+        return res.status(
+          insightResult.available === false ? 503 : 502
+        ).json({
+          success: false,
+          available: insightResult.available,
+          status: "error",
+          message:
+            insightResult.message || "AI insight temporarily unavailable",
+        });
+      }
+
+      return res.status(200).json(insightResult);
+    } catch (error) {
+      console.error("AI INSIGHT ERROR:", error?.message || error);
+      return res.status(503).json({
+        status: "error",
+        message: "AI insight temporarily unavailable.",
+        code: "AI_INSIGHT_UNAVAILABLE",
       });
     }
   }

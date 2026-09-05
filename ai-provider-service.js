@@ -7,6 +7,12 @@ const OPENROUTER_URL =
 const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || "openrouter/free";
 
+// App attribution sent to OpenRouter (server-side only, never exposed).
+const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || "https://soberwatch.app";
+const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || "SoberWatch";
+
+const REQUEST_TIMEOUT_MS = 45000;
+
 async function chatWithAI({
   messages,
   tools = [],
@@ -38,10 +44,11 @@ async function chatWithAI({
       "Content-Type": "application/json",
       Accept: "application/json",
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "HTTP-Referer": process.env.APP_URL || "https://soberwatch.app",
-      "X-Title": "SoberWatch",
+      "HTTP-Referer": OPENROUTER_SITE_URL,
+      "X-Title": OPENROUTER_APP_NAME,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const text = await response.text();
