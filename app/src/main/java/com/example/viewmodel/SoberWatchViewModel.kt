@@ -167,7 +167,11 @@ class SoberWatchViewModel(application: Application) : AndroidViewModel(applicati
 
   fun sendMessageToAi(message: String) {
     if (message.isBlank()) return
-    
+
+    val firebaseToken = try {
+      FirebaseAuth.getInstance().currentUser?.getIdToken(false)?.result?.token ?: ""
+    } catch (e: Exception) { "" }
+
     viewModelScope.launch {
       try {
           val userMsg = ChatMessageEntity(role = "user", content = message, audioPath = null, timestamp = System.currentTimeMillis())
@@ -176,16 +180,21 @@ class SoberWatchViewModel(application: Application) : AndroidViewModel(applicati
           val response = aiAssistantService.getClinicalResponse(
             message,
             userProfile.value,
-            currentReading.value
+            currentReading.value,
+            firebaseToken
           )
-          
-          val modelMsg = ChatMessageEntity(role = "model", content = response, audioPath = null, timestamp = System.currentTimeMillis())
-          chatDao.insertMessage(modelMsg)
-          voiceService.speak(response)
+
+          if (response.isNotBlank()) {
+            val modelMsg = ChatMessageEntity(role = "model", content = response, audioPath = null, timestamp = System.currentTimeMillis())
+            chatDao.insertMessage(modelMsg)
+            voiceService.speak(response)
+          } else {
+            val errorMsg = ChatMessageEntity(role = "model", content = "AI service temporarily unavailable.", audioPath = null, timestamp = System.currentTimeMillis())
+            chatDao.insertMessage(errorMsg)
+          }
       } catch (e: Throwable) {
-          // Prevent crash if AI service fails (catch all Throwables including Errors)
           try {
-              val errorMsg = ChatMessageEntity(role = "model", content = "I'm having trouble connecting to my clinical database. Please check your internet.", audioPath = null, timestamp = System.currentTimeMillis())
+              val errorMsg = ChatMessageEntity(role = "model", content = "AI service temporarily unavailable.", audioPath = null, timestamp = System.currentTimeMillis())
               chatDao.insertMessage(errorMsg)
           } catch (_: Throwable) {}
       }
@@ -211,9 +220,10 @@ class SoberWatchViewModel(application: Application) : AndroidViewModel(applicati
         val userMsg = ChatMessageEntity(role = "user", content = "Voice Note Sent", audioPath = path, timestamp = System.currentTimeMillis())
         chatDao.insertMessage(userMsg)
 
-        val simulatedTranscription = "How is my heart rate and BAC?" 
+        val transcript = voiceService.spokenText.valueOrNull
+        val usedTranscript = if (transcript != null && transcript.isNotEmpty()) transcript else "Voice note received"
         val response = aiAssistantService.getClinicalResponse(
-          "I've analyzed your voice note: '$simulatedTranscription'. " + 
+          "I've analyzed your voice note: '$usedTranscript'. " + 
           "Based on your live telemetry context (BAC: ${currentReading.value.alcoholBac}%, HR: ${currentReading.value.heartRateBpm} BPM), your condition appears stable. Continue monitoring.",
           userProfile.value,
           currentReading.value

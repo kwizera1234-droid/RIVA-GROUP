@@ -3,9 +3,8 @@ require("dotenv").config();
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
-const { analyzeTelemetry } = require("./ai-analysis-service");
+const { analyzeTelemetry } = require("./gemini-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
-const { searchCurrentInfo } = require("./search-service");
 
 const app = express();
 
@@ -448,7 +447,6 @@ app.use(simpleRateLimit);
 // ROOT
 // ============================================================
 
-
 app.get("/", (req, res) => {
   res.status(200).json({
     service:
@@ -507,15 +505,6 @@ app.get("/", (req, res) => {
 
       emergencies:
         "GET /api/emergencies?uid=UID",
-
-      voiceChat:
-        "POST /api/voice/chat",
-
-      voiceProactive:
-        "POST /api/voice/proactive",
-
-      search:
-        "GET /api/search?q=QUERY",
     },
 
     version: "5.0.0",
@@ -1901,7 +1890,7 @@ app.get(
 
 
 // ============================================================
-// OPENROUTER AI ANALYSIS
+// GEMINI AI ANALYSIS
 // POST /api/ai/analyze
 //
 // IMPORTANT:
@@ -1979,7 +1968,7 @@ app.post(
       ) {
         return res.status(200).json({
           status: "success",
-          source: "openrouter-cache",
+          source: "gemini-cache",
           data: cached.data,
         });
       }
@@ -2010,25 +1999,18 @@ app.post(
           history
         );
 
-      if (!result.success) {
-        // NEVER cache failed AI analysis results
-        return res.status(503).json({
-          status: "error",
-          source: "openrouter",
-          error: result.message || "AI analysis is temporarily unavailable",
-          code: "AI_ANALYSIS_UNAVAILABLE",
-        });
-      }
-
       const responseData = {
         uid,
-        generatedAt: Date.now(),
-        model: result.model,
-        telemetry: latest,
-        analysis: result.analysis,
+        generatedAt:
+          Date.now(),
+        model:
+          result.model,
+        telemetry:
+          latest,
+        analysis:
+          result.analysis,
       };
 
-      // Only cache successful results
       aiAnalysisCache.set(uid, {
         createdAt: Date.now(),
         data: responseData,
@@ -2036,13 +2018,13 @@ app.post(
 
       return res.status(200).json({
         status: "success",
-        source: "openrouter",
+        source: "gemini",
         data: responseData,
       });
 
     } catch (error) {
       console.error(
-        "OPENROUTER AI ANALYSIS ERROR:",
+        "GEMINI AI ANALYSIS ERROR:",
         error?.message ||
           error
       );
@@ -2052,7 +2034,7 @@ app.post(
         message:
           "AI analysis is temporarily unavailable",
         code:
-          "AI_ANALYSIS_UNAVAILABLE",
+          "GEMINI_UNAVAILABLE",
       });
     }
   }
@@ -2229,73 +2211,6 @@ app.post(
 );
 
 // ============================================================
-// SEARCH / CURRENT INFORMATION
-// ============================================================
-//
-// Single canonical endpoint for current-information requests from the
-// frontend (Ahabanza / AI Safety Advisory) and the voice AI.
-//
-// The backend performs the actual web/Google search, normalizes the raw
-// results, caches them (to avoid consuming search quota on repeats), and
-// returns clean JSON to the frontend. No Google/API keys ever reach the
-// browser or APK.
-
-app.get(
-  "/api/search",
-  requireFirebaseAuth,
-  async (req, res) => {
-    const query = String(req.query.q || "")
-      .trim()
-      .slice(0, 200);
-
-    if (!query) {
-      return res.status(400).json({
-        status: "error",
-        success: false,
-        message: "q query parameter is required",
-      });
-    }
-
-    const limit = Math.min(
-      Math.max(Number(req.query.limit) || 8, 1),
-      15
-    );
-
-    try {
-      const result = await searchCurrentInfo({
-        query,
-        limit,
-      });
-
-      if (!result.success) {
-        return res.status(502).json({
-          status: "error",
-          success: false,
-          message: "Amakuru mashya ntaraboneka. Ongera ugerageze nyuma.",
-          code: "SEARCH_FAILED",
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        query: result.query,
-        generatedAt: result.generatedAt,
-        cached: Boolean(result.cached),
-        results: result.results || [],
-      });
-    } catch (error) {
-      console.error("SEARCH ENDPOINT ERROR:", error?.message || error);
-      return res.status(503).json({
-        status: "error",
-        success: false,
-        message: "Amakuru mashya ntaraboneka. Ongera ugerageze nyuma.",
-        code: "SEARCH_UNAVAILABLE",
-      });
-    }
-  }
-);
-
-// ============================================================
 // 404
 // ============================================================
 
@@ -2379,6 +2294,4 @@ app.listen(
     );
   }
 );
-
-
 

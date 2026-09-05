@@ -249,6 +249,24 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
   };
 }
 
+async function callOllama(prompt) {
+  const response = await fetch("http://127.0.0.1:11434/api/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL || "llama3.2:3b",
+      options: { temperature: 0.2, num_predict: 60 },
+      prompt: `You are SoberWatch AI. ${prompt}`,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Ollama request failed: ${response.status}`);
+  const data = await response.json();
+  return data.response || "";
+}
 
 async function chatWithAssistant({
   transcript,
@@ -346,18 +364,30 @@ async function chatWithAssistant({
       generatedAt: Date.now(),
     };
   } catch (error) {
-    console.error("OPENROUTER VOICE AI ERROR:", error?.message || error);
-    return {
-      success: false,
-      available: false,
-      reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
-      language: language || "auto",
-      actions: [],
-      sources: [],
-      error: process.env.NODE_ENV === "development"
-        ? (error?.message || String(error))
-        : undefined,
-    };
+    console.error("VOICE AI ERROR:", error?.message || error);
+    try {
+      const ollamaReply = (await callOllama(systemPrompt + "\nUser: " + safeTranscript)).trim();
+      return {
+        success: true,
+        available: true,
+        model: "ollama",
+        reply: ollamaReply || "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        generatedAt: Date.now(),
+      };
+    } catch (ollamaError) {
+      return {
+        success: false,
+        available: false,
+        reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        error: process.env.NODE_ENV === "development" ? (error?.message || ollamaError?.message) : undefined,
+      };
+    }
   }
 }
 

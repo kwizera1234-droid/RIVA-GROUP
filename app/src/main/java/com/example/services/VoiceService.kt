@@ -42,7 +42,11 @@ class VoiceService(private val context: Context) : RecognitionListener {
   private fun initializeTts() {
     tts = TextToSpeech(context) { status ->
       if (status == TextToSpeech.SUCCESS) {
-        tts?.language = Locale.US
+        val rwLocale = Locale("rw", "RW")
+        val result = tts?.setLanguage(rwLocale)
+        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+          tts?.language = Locale.getDefault()
+        }
         isTtsInitialized = true
       }
     }
@@ -58,7 +62,8 @@ class VoiceService(private val context: Context) : RecognitionListener {
 
     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
       putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-      putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "rw-RW")
+      putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
     }
 
     speechRecognizer?.startListening(intent)

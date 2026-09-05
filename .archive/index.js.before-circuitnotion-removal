@@ -3,7 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
-const { analyzeTelemetry } = require("./ai-analysis-service");
+const { analyzeTelemetry } = require("./gemini-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
 const { searchCurrentInfo } = require("./search-service");
 
@@ -448,6 +448,72 @@ app.use(simpleRateLimit);
 // ROOT
 // ============================================================
 
+
+app.get("/api/ai/circuitnotion-test", async (req, res) => {
+  try {
+    const apiKey = process.env.CIRCUITNOTION_API_KEY || "";
+    const model = process.env.CIRCUITNOTION_MODEL || "circuit-2-turbo";
+
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        error: "CIRCUITNOTION_API_KEY is missing on Render"
+      });
+    }
+
+    const response = await fetch(
+      "https://api.circuitnotion.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "user",
+              content: "Muraho. Subiza uti: CIRCUITNOTION RENDER TEST OK"
+            }
+          ],
+          max_tokens: 30,
+          temperature: 0
+        })
+      }
+    );
+
+    const contentType =
+      response.headers.get("content-type") || "unknown";
+
+    const text = await response.text();
+
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: response.ok,
+      httpStatus: response.status,
+      contentType,
+      model,
+      provider: "circuitnotion",
+      response:
+        data?.choices?.[0]?.message?.content ||
+        data?.error?.message ||
+        text.slice(0, 500)
+    });
+  } catch (error) {
+    console.error("CIRCUITNOTION RENDER TEST ERROR:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -1901,7 +1967,7 @@ app.get(
 
 
 // ============================================================
-// OPENROUTER AI ANALYSIS
+// GEMINI AI ANALYSIS
 // POST /api/ai/analyze
 //
 // IMPORTANT:
@@ -1979,7 +2045,7 @@ app.post(
       ) {
         return res.status(200).json({
           status: "success",
-          source: "openrouter-cache",
+          source: "gemini-cache",
           data: cached.data,
         });
       }
@@ -2010,25 +2076,18 @@ app.post(
           history
         );
 
-      if (!result.success) {
-        // NEVER cache failed AI analysis results
-        return res.status(503).json({
-          status: "error",
-          source: "openrouter",
-          error: result.message || "AI analysis is temporarily unavailable",
-          code: "AI_ANALYSIS_UNAVAILABLE",
-        });
-      }
-
       const responseData = {
         uid,
-        generatedAt: Date.now(),
-        model: result.model,
-        telemetry: latest,
-        analysis: result.analysis,
+        generatedAt:
+          Date.now(),
+        model:
+          result.model,
+        telemetry:
+          latest,
+        analysis:
+          result.analysis,
       };
 
-      // Only cache successful results
       aiAnalysisCache.set(uid, {
         createdAt: Date.now(),
         data: responseData,
@@ -2036,13 +2095,13 @@ app.post(
 
       return res.status(200).json({
         status: "success",
-        source: "openrouter",
+        source: "gemini",
         data: responseData,
       });
 
     } catch (error) {
       console.error(
-        "OPENROUTER AI ANALYSIS ERROR:",
+        "GEMINI AI ANALYSIS ERROR:",
         error?.message ||
           error
       );

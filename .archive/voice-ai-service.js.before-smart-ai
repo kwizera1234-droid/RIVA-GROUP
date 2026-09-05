@@ -1,13 +1,11 @@
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
+const OPENROUTER_API_KEY = process.env.SOBERWATCH_API_KEY1 || "";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-const { searchCurrentInfo } = require("./search-service");
-
 function isFreshnessRequest(text) {
   const value = String(text || "").toLowerCase();
-  return /(latest|current|today|now|weather|news|restaurant|near me|nearby|price|prices|recent|this week|tomorrow|upcoming|today's|current information|what is happening|what's happening|where is|how much|laws|traffic|amakuru\s+mashya|makuru\s+mashya|mashya|uyu munsi|birabaye|icyumweru|nouveaux|aujourd'hui|actu|météo|habari\s+mpya|mpya|ya\s+leo|leo)/i.test(value);
+  return /(latest|current|today|now|weather|news|restaurant|near me|nearby|price|prices|recent|this week|tomorrow|upcoming|today's|current information|what is happening|what's happening|where is|how much|laws|traffic)/i.test(value);
 }
 
 function buildOpenRouterTools(includeSearch) {
@@ -123,24 +121,22 @@ function buildOpenRouterTools(includeSearch) {
 }
 
 function buildSystemInstruction({ language, telemetry, location, profile }) {
-  return `You are SoberWatch AI, a highly capable natural multilingual conversational assistant.
+  return `You are SoberWatch AI, a general-purpose multilingual assistant for an Android safety app.
 
-Understand the users intended meaning, not isolated keywords. Understand natural Kinyarwanda, English, French, Kiswahili, slang, jokes, sarcasm, idioms, incomplete speech, ASR mistakes, and mixed-language conversation. Do not treat jokes, hypotheticals, stories, or figurative language as real device commands.
+You are not limited to health, and you are expected to understand normal conversation, questions, follow-ups, technology, school, work, translation, planning, current information, weather, places, restaurants, services, health, driving, SoberWatch readings, contacts, and emergency situations.
 
-Use conversation history to understand follow-ups and previous context. Answer the actual question naturally instead of forcing everything into SoberWatch. Do not give canned responses. If the user is joking, respond naturally. If meaning is genuinely unclear, ask one short clarification in the same language.
+Languages: Kinyarwanda, English, French, Kiswahili, and mixed-language conversation.
+If the user speaks Kinyarwanda, answer in natural Kinyarwanda. If English, answer in English. If French, answer in French. If Kiswahili, answer in Kiswahili.
+Maintain conversation context and do not ask again for information already provided.
 
-Reply in the users dominant language. For Kinyarwanda, use fluent natural Kinyarwanda, not awkward literal translations.
-
-Tools can perform real actions. Only use consequential Android actions when the users intention is clear. Never call, message, share location, or trigger emergency actions merely because those words were mentioned. Never claim an action completed unless Android confirms it.
-
-Never invent telemetry, health readings, contacts, or location. SoberWatch readings are device measurements, not automatically a medical diagnosis.
-
-Telemetry: ${JSON.stringify(telemetry || {}, null, 2)}
-Location: ${JSON.stringify(location || {}, null, 2)}
+Never invent telemetry values. SoberWatch status is a device reading, not a diagnosis.
+Current telemetry: ${JSON.stringify(telemetry || {}, null, 2)}
+Current location: ${JSON.stringify(location || {}, null, 2)}
 User profile: ${JSON.stringify(profile || {}, null, 2)}
-Requested language: ${language || 'auto'}
 
-Be warm, intelligent, direct, and concise. Give simple answers to simple questions and clear explanations to complex questions. Never invent facts.`;
+Use Android actions only when the user truly requests a device operation. Never claim that a real action completed unless Android confirms execution.
+Keep answers concise and natural unless the user asks for detail.
+`;
 }
 
 function normalizeOpenRouterMessages(history = []) {
@@ -249,6 +245,24 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
   };
 }
 
+async function callOllama(prompt) {
+  const response = await fetch("http://127.0.0.1:11434/api/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL || "llama3.2:3b",
+      options: { temperature: 0.2, num_predict: 60 },
+      prompt: `You are SoberWatch AI. ${prompt}`,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Ollama request failed: ${response.status}`);
+  const data = await response.json();
+  return data.response || "";
+}
 
 async function chatWithAssistant({
   transcript,
@@ -280,38 +294,6 @@ async function chatWithAssistant({
   const hasSearch = isFreshnessRequest(safeTranscript) || isFreshnessRequest(JSON.stringify(history || []));
   const tools = buildOpenRouterTools(hasSearch);
 
-  // When current information is required, the backend performs a real Google
-  // (Google News RSS) search and includes the real results as grounded context
-  // so the AI never fabricates news. Results are also returned as real sources.
-  let groundedSources = [];
-  if (hasSearch) {
-    try {
-      const search = await searchCurrentInfo({
-        query: safeTranscript.length > 80 ? safeTranscript.slice(0, 80) : safeTranscript,
-        limit: 5,
-        days: 7,
-      });
-      if (search && search.success && Array.isArray(search.results)) {
-        groundedSources = search.results;
-        const contextBlock = groundedSources
-          .map(
-            (r, index) =>
-              `${index + 1}. ${r.title} — ${r.summary} (${r.source}, ${r.publishedAt || "date unknown"}) ${r.url}`
-          )
-          .join("\n");
-
-        if (contextBlock) {
-          messages.push({
-            role: "user",
-            content: `Current web search results for the user's request:\n${contextBlock}\n\nUse ONLY these facts to answer the user's question about current events. Clearly cite the source when you use it. If the results are unrelated, say so honestly.`,
-          });
-        }
-      }
-    } catch (searchError) {
-      console.error("VOICE SEARCH ERROR:", searchError?.message || searchError);
-    }
-  }
-
   try {
     const result = await callOpenRouter({ messages, tools, systemPrompt });
     const reply = result.reply || "Ntabwo nabashije kubona igisubizo.";
@@ -321,18 +303,6 @@ async function chatWithAssistant({
       requiresAndroidExecution: ["call_contact", "share_location", "emergency_alert"].includes(call.name),
     }));
 
-    // Merge OpenRouter-provided sources with the backend's real Google results.
-    const mergedSources = [...(Array.isArray(result.sources) ? result.sources : [])];
-    if (groundedSources.length) {
-      const existingKeys = new Set(mergedSources.map((s) => String(s?.url || "")));
-      for (const source of groundedSources) {
-        if (source.url && !existingKeys.has(source.url)) {
-          mergedSources.push(source);
-          existingKeys.add(source.url);
-        }
-      }
-    }
-
     return {
       success: true,
       available: true,
@@ -340,24 +310,36 @@ async function chatWithAssistant({
       reply,
       language: language || "auto",
       actions,
-      sources: mergedSources.slice(0, 8),
+      sources: result.sources || [],
       sessionId: sessionId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       memory: { enabled: true, conversationTurns: messages.length },
       generatedAt: Date.now(),
     };
   } catch (error) {
-    console.error("OPENROUTER VOICE AI ERROR:", error?.message || error);
-    return {
-      success: false,
-      available: false,
-      reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
-      language: language || "auto",
-      actions: [],
-      sources: [],
-      error: process.env.NODE_ENV === "development"
-        ? (error?.message || String(error))
-        : undefined,
-    };
+    console.error("VOICE AI ERROR:", error?.message || error);
+    try {
+      const ollamaReply = (await callOllama(systemPrompt + "\nUser: " + safeTranscript)).trim();
+      return {
+        success: true,
+        available: true,
+        model: "ollama",
+        reply: ollamaReply || "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        generatedAt: Date.now(),
+      };
+    } catch (ollamaError) {
+      return {
+        success: false,
+        available: false,
+        reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+        language: language || "auto",
+        actions: [],
+        sources: [],
+        error: process.env.NODE_ENV === "development" ? (error?.message || ollamaError?.message) : undefined,
+      };
+    }
   }
 }
 

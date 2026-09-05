@@ -1,101 +1,237 @@
-const { searchGoogleNews } = require("./news-service");
-
-const SEARCH_CACHE_DEFAULT_MS = 5 * 60 * 1000; // 5 minutes default
+const SEARCH_CACHE_DEFAULT_MS = 5 * 60 * 1000;
 const searchCache = new Map();
 
 function getCacheKey(query) {
-  return String(query || "")
-    .trim()
-    .toLowerCase();
+  return String(query || "").trim().toLowerCase();
 }
 
 function getCachedSearch(query) {
   const key = getCacheKey(query);
   const item = searchCache.get(key);
+
   if (!item) return null;
+
   if (Date.now() - item.createdAt > item.ttl) {
     searchCache.delete(key);
     return null;
   }
+
   return item.value;
 }
 
 function setCachedSearch(query, value, ttl) {
-  const key = getCacheKey(query);
-  searchCache.set(key, { value, createdAt: Date.now(), ttl });
+  searchCache.set(getCacheKey(query), {
+    value,
+    createdAt: Date.now(),
+    ttl,
+  });
 }
 
-/**
- * Normalize a raw article into the shared frontend shape.
- *
- * Callers always pass real URLs from real sources. We never construct or
- * invent URLs, titles, summaries, or dates here.
- */
-function normalizeArticle(article, query) {
-  if (!article || typeof article !== "object") return null;
+function getHostname(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
 
-  const url = String(article.url || article.link || "").trim();
-  // A result without a usable source URL cannot be surfaced in a card that
-  // requires a clickable link.
-  if (!url) return null;
+function extractPublishedAt(item) {
+  const meta = item?.pagemap?.metatags;
 
-  const title = String(article.title || "").trim();
-  if (!title) return null;
+  if (!Array.isArray(meta) || !meta.length) return null;
 
-  const published = article.publishedAt
-    ? new Date(article.publishedAt)
-    : null;
-  const hasValidDate = published && !Number.isNaN(published.getTime());
+  const candidate = meta[0];
+
+  const values = [
+    candidate["article:published_time"],
+    candidate["datepublished"],
+    candidate["datePublished"],
+    candidate["publishdate"],
+    candidate["publish_date"],
+    candidate["date"],
+    candidate["og:updated_time"],
+  ];
+
+  for (const value of values) {
+    if (!value) continue;
+
+    const date = new Date(value);
+
+    if (!Number.isNaN(date.getTime())) {
+      return date.toISOString();
+    }
+  }
+
+  return null;
+}
+
+function normalizeArticle(item) {
+  if (!item || typeof item !== "object") return null;
+
+  const url = String(item.link || "").trim();
+  const title = String(item.title || "").trim();
+
+  if (!url || !title) return null;
 
   return {
     title,
-    summary: String(article.description || article.summary || "").trim().slice(0, 300),
-    source: String(article.source || article.domain || "").trim() || "Google News",
+    summary: String(item.snippet || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 500),
+    source:
+      String(item.displayLink || "").trim() ||
+      getHostname(url) ||
+      "Web",
     url,
-    publishedAt: hasValidDate ? published.toISOString() : null,
+    publishedAt: extractPublishedAt(item),
   };
 }
 
-/**
- * Search Google News for the current information requested by the frontend or
- * the voice AI. This is the canonical backend "Google Search" source: real news
- * results fetched live from Google News RSS. No fabricated data.
- *
- * Results are cached in memory for `cacheMs` to avoid hammering the source and
- * consuming fetch/API quota on repeated/duplicate requests.
- */
-async function searchCurrentInfo({
-  query = "Rwanda road safety news",
+async function googleWebSearch({
+  query,
   limit = 8,
   days = 7,
-  languages = ["rw", "en", "fr", "sw"],
+} = {}) {
+  const apiKey = String(process.env.GOOGLE_SEARCH_API_KEY || "").trim();
+  const engineId = String(
+    process.env.GOOGLE_SEARCH_ENGINE_ID || ""
+  ).trim();
+
+  if (!apiKey) {
+    throw new Error("GOOGLE_SEARCH_API_KEY is missing");
+  }
+
+  if (!engineId) {
+    throw new Error("GOOGLE_SEARCH_ENGINE_ID is missing");
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 8, 1), 10);
+
+  const url = new URL(
+    "https://www.googleapis.com/customsearch/v1"
+  );
+
+  url.searchParams.set("key", apiKey);
+  url.searchParams.set("cx", engineId);
+  url.searchParams.set("q", query);
+  url.searchParams.set("num", String(safeLimit));
+  url.searchParams.set("gl", "rw");
+
+  if (Number(days) > 0) {
+    url.searchParams.set(
+      "dateRestrict",
+      `d${Math.min(Number(days), 365)}`
+    );
+  }
+
+  console.log("GOOGLE WEB SEARCH URL:", url.origin + url.pathname);
+  console.log("GOOGLE WEB SEARCH QUERY:", query);
+
+  const response = await fetch(url);
+  const text = await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Google Search returned invalid JSON (${response.status})`
+    );
+  }
+
+  if (!response.ok) {
+    console.error(
+      "GOOGLE WEB SEARCH ERROR:",
+      JSON.stringify(data)
+    );
+
+    throw new Error(
+      data?.error?.message ||
+        `Google Search failed with HTTP ${response.status}`
+    );
+  }
+
+  const items = Array.isArray(data.items)
+    ? data.items
+    : [];
+
+  console.log(
+    "GOOGLE WEB SEARCH RESULT COUNT:",
+    items.length
+  );
+
+  return items
+    .map(normalizeArticle)
+    .filter(Boolean);
+}
+
+async function searchCurrentInfo({
+  query = "Rwanda road safety latest news",
+  limit = 8,
+  days = 7,
   cacheMs = SEARCH_CACHE_DEFAULT_MS,
 } = {}) {
-  const safeQuery = String(query || "").trim();
+  const safeQuery = String(query || "")
+    .trim()
+    .slice(0, 200);
+
   if (!safeQuery) {
-    return { success: false, query: safeQuery, results: [], error: "query is required" };
+    return {
+      success: false,
+      query: safeQuery,
+      results: [],
+      error: "query is required",
+    };
   }
 
   console.log("SEARCH REQUEST RECEIVED:", safeQuery);
 
   const cached = getCachedSearch(safeQuery);
+
   if (cached) {
     console.log("SEARCH CACHE HIT:", safeQuery);
-    return { ...cached, cached: true };
+
+    return {
+      ...cached,
+      cached: true,
+    };
   }
 
   console.log("GOOGLE SEARCH STARTED:", safeQuery);
 
-  let articles = [];
   try {
-    const result = await searchGoogleNews(safeQuery, Math.max(limit, 10), {
+    const articles = await googleWebSearch({
+      query: safeQuery,
+      limit,
       days,
-      languages,
-      country: "Rwanda",
     });
-    articles = Array.isArray(result?.articles) ? result.articles : [];
+
+    const results = articles.slice(0, limit);
+
+    const payload = {
+      success: true,
+      query: safeQuery,
+      generatedAt: new Date().toISOString(),
+      results,
+    };
+
+    setCachedSearch(
+      safeQuery,
+      payload,
+      Number(cacheMs) || SEARCH_CACHE_DEFAULT_MS
+    );
+
+    console.log("SEARCH RESPONSE SENT:", safeQuery);
+
+    return payload;
   } catch (error) {
-    console.error("SEARCH ERROR:", error?.message || error);
+    console.error(
+      "SEARCH ERROR:",
+      error?.message || error
+    );
+
     return {
       success: false,
       query: safeQuery,
@@ -103,25 +239,6 @@ async function searchCurrentInfo({
       error: error?.message || "Search failed",
     };
   }
-
-  const results = articles
-    .map((article) => normalizeArticle(article, safeQuery))
-    .filter(Boolean)
-    .slice(0, limit);
-
-  console.log("GOOGLE SEARCH RESULT COUNT:", results.length);
-
-  const payload = {
-    success: true,
-    query: safeQuery,
-    generatedAt: new Date().toISOString(),
-    results,
-  };
-
-  setCachedSearch(safeQuery, payload, Number(cacheMs) || SEARCH_CACHE_DEFAULT_MS);
-
-  console.log("SEARCH RESPONSE SENT:", safeQuery);
-  return payload;
 }
 
 function invalidateSearchCache() {
