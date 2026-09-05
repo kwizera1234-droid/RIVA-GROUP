@@ -3,9 +3,11 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+const { searchCurrentInfo } = require("./search-service");
+
 function isFreshnessRequest(text) {
   const value = String(text || "").toLowerCase();
-  return /(latest|current|today|now|weather|news|restaurant|near me|nearby|price|prices|recent|this week|tomorrow|upcoming|today's|current information|what is happening|what's happening|where is|how much|laws|traffic)/i.test(value);
+  return /(latest|current|today|now|weather|news|restaurant|near me|nearby|price|prices|recent|this week|tomorrow|upcoming|today's|current information|what is happening|what's happening|where is|how much|laws|traffic|amakuru\s+mashya|makuru\s+mashya|mashya|uyu munsi|birabaye|icyumweru|nouveaux|aujourd'hui|actu|météo|habari\s+mpya|mpya|ya\s+leo|leo)/i.test(value);
 }
 
 function buildOpenRouterTools(includeSearch) {
@@ -296,6 +298,38 @@ async function chatWithAssistant({
   const hasSearch = isFreshnessRequest(safeTranscript) || isFreshnessRequest(JSON.stringify(history || []));
   const tools = buildOpenRouterTools(hasSearch);
 
+  // When current information is required, the backend performs a real Google
+  // (Google News RSS) search and includes the real results as grounded context
+  // so the AI never fabricates news. Results are also returned as real sources.
+  let groundedSources = [];
+  if (hasSearch) {
+    try {
+      const search = await searchCurrentInfo({
+        query: safeTranscript.length > 80 ? safeTranscript.slice(0, 80) : safeTranscript,
+        limit: 5,
+        days: 7,
+      });
+      if (search && search.success && Array.isArray(search.results)) {
+        groundedSources = search.results;
+        const contextBlock = groundedSources
+          .map(
+            (r, index) =>
+              `${index + 1}. ${r.title} — ${r.summary} (${r.source}, ${r.publishedAt || "date unknown"}) ${r.url}`
+          )
+          .join("\n");
+
+        if (contextBlock) {
+          messages.push({
+            role: "user",
+            content: `Current web search results for the user's request:\n${contextBlock}\n\nUse ONLY these facts to answer the user's question about current events. Clearly cite the source when you use it. If the results are unrelated, say so honestly.`,
+          });
+        }
+      }
+    } catch (searchError) {
+      console.error("VOICE SEARCH ERROR:", searchError?.message || searchError);
+    }
+  }
+
   try {
     const result = await callOpenRouter({ messages, tools, systemPrompt });
     const reply = result.reply || "Ntabwo nabashije kubona igisubizo.";
@@ -305,6 +339,18 @@ async function chatWithAssistant({
       requiresAndroidExecution: ["call_contact", "share_location", "emergency_alert"].includes(call.name),
     }));
 
+    // Merge OpenRouter-provided sources with the backend's real Google results.
+    const mergedSources = [...(Array.isArray(result.sources) ? result.sources : [])];
+    if (groundedSources.length) {
+      const existingKeys = new Set(mergedSources.map((s) => String(s?.url || "")));
+      for (const source of groundedSources) {
+        if (source.url && !existingKeys.has(source.url)) {
+          mergedSources.push(source);
+          existingKeys.add(source.url);
+        }
+      }
+    }
+
     return {
       success: true,
       available: true,
@@ -312,7 +358,7 @@ async function chatWithAssistant({
       reply,
       language: language || "auto",
       actions,
-      sources: result.sources || [],
+      sources: mergedSources.slice(0, 8),
       sessionId: sessionId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       memory: { enabled: true, conversationTurns: messages.length },
       generatedAt: Date.now(),

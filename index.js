@@ -5,6 +5,7 @@ const admin = require("firebase-admin");
 const cors = require("cors");
 const { analyzeTelemetry } = require("./gemini-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
+const { searchCurrentInfo } = require("./search-service");
 
 const app = express();
 
@@ -447,6 +448,74 @@ app.use(simpleRateLimit);
 // ROOT
 // ============================================================
 
+
+// TEMPORARY CIRCUITNOTION RENDER TEST
+app.get("/api/ai/circuitnotion-test", async (req, res) => {
+  try {
+    const apiKey = process.env.CIRCUITNOTION_API_KEY || "";
+    const model = process.env.CIRCUITNOTION_MODEL || "circuit-2-turbo";
+
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        error: "CIRCUITNOTION_API_KEY is missing on Render"
+      });
+    }
+
+    const response = await fetch(
+      "https://api.circuitnotion.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "user",
+              content: "Muraho. Subiza uti: CIRCUITNOTION RENDER TEST OK"
+            }
+          ],
+          max_tokens: 30,
+          temperature: 0
+        })
+      }
+    );
+
+    const contentType =
+      response.headers.get("content-type") || "unknown";
+
+    const text = await response.text();
+
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: response.ok,
+      httpStatus: response.status,
+      contentType,
+      model,
+      provider: "circuitnotion",
+      response:
+        data?.choices?.[0]?.message?.content ||
+        data?.error?.message ||
+        text.slice(0, 500)
+    });
+  } catch (error) {
+    console.error("CIRCUITNOTION RENDER TEST ERROR:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get("/", (req, res) => {
   res.status(200).json({
     service:
@@ -505,6 +574,15 @@ app.get("/", (req, res) => {
 
       emergencies:
         "GET /api/emergencies?uid=UID",
+
+      voiceChat:
+        "POST /api/voice/chat",
+
+      voiceProactive:
+        "POST /api/voice/proactive",
+
+      search:
+        "GET /api/search?q=QUERY",
     },
 
     version: "5.0.0",
@@ -2205,6 +2283,73 @@ app.post(
         message:
           "Voice AI is temporarily unavailable. Please try again later.",
         code: "VOICE_AI_UNAVAILABLE",
+      });
+    }
+  }
+);
+
+// ============================================================
+// SEARCH / CURRENT INFORMATION
+// ============================================================
+//
+// Single canonical endpoint for current-information requests from the
+// frontend (Ahabanza / AI Safety Advisory) and the voice AI.
+//
+// The backend performs the actual web/Google search, normalizes the raw
+// results, caches them (to avoid consuming search quota on repeats), and
+// returns clean JSON to the frontend. No Google/API keys ever reach the
+// browser or APK.
+
+app.get(
+  "/api/search",
+  requireFirebaseAuth,
+  async (req, res) => {
+    const query = String(req.query.q || "")
+      .trim()
+      .slice(0, 200);
+
+    if (!query) {
+      return res.status(400).json({
+        status: "error",
+        success: false,
+        message: "q query parameter is required",
+      });
+    }
+
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 8, 1),
+      15
+    );
+
+    try {
+      const result = await searchCurrentInfo({
+        query,
+        limit,
+      });
+
+      if (!result.success) {
+        return res.status(502).json({
+          status: "error",
+          success: false,
+          message: "Amakuru mashya ntaraboneka. Ongera ugerageze nyuma.",
+          code: "SEARCH_FAILED",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        query: result.query,
+        generatedAt: result.generatedAt,
+        cached: Boolean(result.cached),
+        results: result.results || [],
+      });
+    } catch (error) {
+      console.error("SEARCH ENDPOINT ERROR:", error?.message || error);
+      return res.status(503).json({
+        status: "error",
+        success: false,
+        message: "Amakuru mashya ntaraboneka. Ongera ugerageze nyuma.",
+        code: "SEARCH_UNAVAILABLE",
       });
     }
   }
