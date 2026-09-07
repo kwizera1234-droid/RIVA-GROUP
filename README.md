@@ -24,3 +24,7 @@ The API key is server-side only and is never exposed to the frontend or Android 
 - Optional current-information requests may trigger server-side web search.
 - The backend returns the reply and any sources metadata to the frontend.
 - The frontend handles TTS and Android actions only after the backend confirms the result.
+
+## Download SoberWatch APK
+
+[Download SoberWatch.apk](apk/SoberWatch.apk)

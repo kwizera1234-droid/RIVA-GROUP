@@ -1,5 +1,11 @@
 require("dotenv").config();
 
+console.log(
+  "OpenRouter environment check:",
+  Boolean(String(process.env.OPENROUTER_API_KEY || "").trim())
+);
+
+
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -82,8 +88,11 @@ if (!FIREBASE_WEB_API_KEY) {
 // ============================================================
 
 const DEVICE_API_KEY =
-  process.env.SOBERWATCH_DEVICE_KEY ||
-  "SOBER_WATCH_DEVICE_KEY_2026";
+  process.env.SOBERWATCH_DEVICE_KEY || "";
+
+if (!DEVICE_API_KEY) {
+  console.warn("WARNING: SOBERWATCH_DEVICE_KEY is not configured; device uploads are disabled.");
+}
 
 function validateDeviceKey(req) {
   const apiKey =
@@ -93,6 +102,18 @@ function validateDeviceKey(req) {
   return Boolean(
     apiKey && apiKey === DEVICE_API_KEY
   );
+}
+
+async function getAuthenticatedUploadUid(req) {
+  const token = getBearerToken(req);
+  if (!token || !firebaseReady) return null;
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    return decodedToken.uid || null;
+  } catch (error) {
+    console.error("TELEMETRY AUTH ERROR:", error.code || error.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -118,13 +139,13 @@ const READINGS_CACHE_MS =
   Number(process.env.READINGS_CACHE_MS) || 15000;
 
 const TELEMETRY_MIN_INTERVAL_MS =
-  Number(process.env.TELEMETRY_MIN_INTERVAL_MS) || 30000;
+  Number(process.env.TELEMETRY_MIN_INTERVAL_MS ?? 0);
 
 const HISTORY_WRITE_INTERVAL_MS =
-  Number(process.env.HISTORY_WRITE_INTERVAL_MS) || 60000;
+  Number(process.env.HISTORY_WRITE_INTERVAL_MS ?? 0);
 
 const USER_LAST_READING_INTERVAL_MS =
-  Number(process.env.USER_LAST_READING_INTERVAL_MS) || 30000;
+  Number(process.env.USER_LAST_READING_INTERVAL_MS ?? 0);
 
 const MAX_READINGS_LIMIT =
   Number(process.env.MAX_READINGS_LIMIT) || 30;
@@ -222,17 +243,34 @@ function normalizeTelemetry(body) {
         ? body.temperature
         : body.temp;
 
-  const bacValue =
-    Number(alcoholBac) || 0;
+  const bacValue = Number(alcoholBac);
 
-  const heartRateValue =
-    Number(heartRateBpm) || 0;
+  const heartRateValue = Number(heartRateBpm);
 
-  const spo2Value =
-    Number(spo2Percent) || 0;
+  const spo2Value = Number(spo2Percent);
 
-  const temperatureValue =
-    Number(tempCelsius) || 0;
+  const temperatureValue = Number(tempCelsius);
+  const rawTimestamp = body.timestamp;
+  const timestampValue = rawTimestamp === undefined || rawTimestamp === null || rawTimestamp === ''
+    ? Date.now()
+    : Number(rawTimestamp);
+
+  if (
+    !Number.isFinite(bacValue) ||
+    bacValue < 0 ||
+    !Number.isFinite(heartRateValue) ||
+    heartRateValue < 0 ||
+    !Number.isFinite(spo2Value) ||
+    spo2Value < 0 ||
+    !Number.isFinite(temperatureValue) ||
+    !Number.isFinite(timestampValue)
+  ) {
+    throw new Error("Telemetry contains invalid numeric values");
+  }
+
+  const normalizedTimestamp = timestampValue < 100000000000
+    ? timestampValue * 1000
+    : timestampValue;
 
   return {
     alcoholBac: bacValue,
@@ -256,17 +294,13 @@ function normalizeTelemetry(body) {
     sensorResponse:
       Number(body.sensorResponse) || 0,
 
-    status:
-      body.status ||
-      calculateStatus(bacValue),
+    status: calculateStatus(bacValue),
 
     deviceId:
       body.deviceId ||
       "SW-001",
 
-    timestamp:
-      Number(body.timestamp) ||
-      Date.now(),
+    timestamp: normalizedTimestamp,
 
     source:
       body.source ||
@@ -466,6 +500,11 @@ app.get("/", (req, res) => {
       FIREBASE_WEB_API_KEY
         ? "email_password_enabled"
         : "login_not_configured",
+
+    openrouter: {
+      configured: Boolean(String(process.env.OPENROUTER_API_KEY || "").trim()),
+      model: String(process.env.OPENROUTER_MODEL || "openrouter/free").trim(),
+    },
 
     quotaProtection: {
       healthCacheMs:
@@ -1178,13 +1217,12 @@ app.post(
     // DEVICE AUTH
     // --------------------------------------------------------
 
-    if (
-      !validateDeviceKey(req)
-    ) {
+    const bearerUid = await getAuthenticatedUploadUid(req);
+    const requestUid = String(req.body.uid || "").trim();
+    if (!validateDeviceKey(req) && (!bearerUid || bearerUid !== requestUid)) {
       return res.status(401).json({
         status: "error",
-        message:
-          "Unauthorized: Invalid Device Key",
+        message: "Unauthorized: provide a valid device key or Firebase user token.",
       });
     }
 
@@ -1199,10 +1237,7 @@ app.post(
       });
     }
 
-    const uid =
-      String(
-        req.body.uid || ""
-      ).trim();
+    const uid = requestUid;
 
     if (!uid) {
       return res.status(400).json({
@@ -1212,10 +1247,15 @@ app.post(
       });
     }
 
-    const telemetryData =
-      normalizeTelemetry(
-        req.body
-      );
+    let telemetryData;
+    try {
+      telemetryData = normalizeTelemetry(req.body);
+    } catch (error) {
+      return res.status(400).json({
+        status: "error",
+        message: error.message,
+      });
+    }
 
     const now =
       Date.now();
@@ -1327,6 +1367,16 @@ app.post(
           }
         );
 
+        console.log("Telemetry database saved", {
+          deviceId: telemetryData.deviceId,
+          timestamp: telemetryData.timestamp,
+          bac: telemetryData.alcoholBac,
+          heartRateBpm: telemetryData.heartRateBpm,
+          spo2Percent: telemetryData.spo2Percent,
+          tempCelsius: telemetryData.tempCelsius,
+          persisted: true,
+        });
+
         lastReadingLastWrittenAt.set(
           uid,
           now
@@ -1401,6 +1451,17 @@ app.post(
         }
 
         await batch.commit();
+
+        console.log("Telemetry database saved", {
+          deviceId: telemetryData.deviceId,
+          timestamp: telemetryData.timestamp,
+          bac: telemetryData.alcoholBac,
+          heartRateBpm: telemetryData.heartRateBpm,
+          spo2Percent: telemetryData.spo2Percent,
+          tempCelsius: telemetryData.tempCelsius,
+          persisted: true,
+          readingId: readingRef.id,
+        });
 
         historyLastWrittenAt.set(
           uid,
@@ -2560,6 +2621,3 @@ app.listen(
     );
   }
 );
-
-
-

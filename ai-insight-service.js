@@ -1,5 +1,7 @@
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const OPENROUTER_FALLBACK_MODELS = String(process.env.OPENROUTER_FALLBACK_MODELS || "")
+  .split(",").map((model) => model.trim()).filter(Boolean).slice(0, 3);
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || "https://soberwatch.app";
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || "SoberWatch";
 
@@ -69,8 +71,6 @@ function buildInsightPrompt({ language, currentReading, recentReadings, deviceSt
     "Recent alerts: " + JSON.stringify(Array.isArray(alerts) ? alerts.slice(0, 8) : []),
     "Page the user is on: " + String(page || "dashboard"),
   ].join("\n");
-}
-
 async function generateInsight({
   language = "rw",
   currentReading = null,
@@ -101,6 +101,9 @@ async function generateInsight({
       },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
+        models: OPENROUTER_FALLBACK_MODELS.length
+          ? [OPENROUTER_MODEL, ...OPENROUTER_FALLBACK_MODELS]
+          : undefined,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -123,6 +126,7 @@ async function generateInsight({
       return {
         success: false,
         available: true,
+        errorCode: `OPENROUTER_${response.status}`,
         message: data?.error?.message || data?.message || "OpenRouter AI temporarily unavailable",
       };
     }
@@ -198,3 +202,4 @@ module.exports = {
   getInsightStatus,
   OPENROUTER_MODEL,
 };
+}

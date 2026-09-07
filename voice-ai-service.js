@@ -1,7 +1,21 @@
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || "https://soberwatch.app";
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || "SoberWatch";
+
+function getOpenRouterApiKey() {
+  return String(process.env.OPENROUTER_API_KEY || "").trim();
+}
+
+function getOpenRouterModel() {
+  return String(process.env.OPENROUTER_MODEL || "openrouter/free").trim();
+}
+
+function getOpenRouterFallbackModels() {
+  const configured = String(process.env.OPENROUTER_FALLBACK_MODELS || "")
+    .split(",")
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return [...new Set(configured)].slice(0, 3);
+}
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_MS = 45000;
@@ -238,7 +252,11 @@ function extractOpenRouterSources(data) {
 }
 
 async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3 }) {
-  if (!OPENROUTER_API_KEY) {
+  const apiKey = getOpenRouterApiKey();
+  const model = getOpenRouterModel();
+  const fallbackModels = getOpenRouterFallbackModels();
+
+  if (!apiKey) {
     throw new Error("OpenRouter API key is not configured on the server.");
   }
 
@@ -246,12 +264,13 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "HTTP-Referer": OPENROUTER_SITE_URL,
       "X-Title": OPENROUTER_APP_NAME,
     },
     body: JSON.stringify({
-      model: OPENROUTER_MODEL,
+      model,
+      models: fallbackModels.length ? [model, ...fallbackModels] : undefined,
       messages: [
         { role: "system", content: systemPrompt },
         ...messages,
@@ -272,8 +291,11 @@ async function callOpenRouter({ messages, tools, systemPrompt, temperature = 0.3
   }
 
   if (!response.ok) {
+    const status = response.status;
     const errorText = data?.error?.message || data?.message || responseText;
-    throw new Error(errorText || `OpenRouter request failed with HTTP ${response.status}`);
+    const error = new Error(errorText || `OpenRouter request failed with HTTP ${status}`);
+    error.code = `OPENROUTER_${status}`;
+    throw error;
   }
 
   const choice = data?.choices?.[0];
@@ -356,7 +378,12 @@ async function chatWithAssistant({
 
   try {
     const result = await callOpenRouter({ messages, tools, systemPrompt });
-    const reply = result.reply || "Ntabwo nabashije kubona igisubizo.";
+    if (!result.reply) {
+      const error = new Error("OpenRouter returned no assistant reply");
+      error.code = "OPENROUTER_EMPTY_RESPONSE";
+      throw error;
+    }
+    const reply = result.reply;
     const actions = result.toolCalls.map((call) => ({
       name: call.name,
       args: call.args || {},
@@ -378,7 +405,7 @@ async function chatWithAssistant({
     return {
       success: true,
       available: true,
-      model: OPENROUTER_MODEL,
+      model: getOpenRouterModel(),
       reply,
       language: language || "auto",
       actions,
@@ -393,13 +420,12 @@ async function chatWithAssistant({
     return {
       success: false,
       available: false,
-      reply: "Habaye ikibazo mu guhuza na AI. Ongera ugerageze.",
+      reply: "",
       language: language || "auto",
       actions: [],
       sources: [],
-      error: process.env.NODE_ENV === "development"
-        ? (error?.message || String(error))
-        : undefined,
+      errorCode: error?.code || "OPENROUTER_UNAVAILABLE",
+      error: process.env.NODE_ENV === "production" ? undefined : (error?.message || String(error)),
     };
   }
 }
@@ -424,12 +450,17 @@ async function generateProactiveGreeting({
       temperature: 0.7,
     });
 
-    const reply = result.reply || "Muraho. Ndi hano kugufasha igihe cyose ubikeneye.";
+    if (!result.reply) {
+      const error = new Error("OpenRouter returned no assistant reply");
+      error.code = "OPENROUTER_EMPTY_RESPONSE";
+      throw error;
+    }
+    const reply = result.reply;
 
     return {
       success: true,
       available: true,
-      model: OPENROUTER_MODEL,
+      model: getOpenRouterModel(),
       reply,
       language: language || "rw",
       actions: [],
@@ -444,6 +475,7 @@ async function generateProactiveGreeting({
       reply: "",
       language: language || "rw",
       actions: [],
+      errorCode: error?.code || "OPENROUTER_UNAVAILABLE",
       error: process.env.NODE_ENV === "development" ? error?.message : undefined,
     };
   }
@@ -452,7 +484,7 @@ async function generateProactiveGreeting({
 module.exports = {
   chatWithAssistant,
   generateProactiveGreeting,
-  OPENROUTER_MODEL,
+  getOpenRouterModel,
 };
 
 /**
