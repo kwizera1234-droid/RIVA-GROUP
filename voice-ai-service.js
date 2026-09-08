@@ -21,6 +21,7 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_MS = 45000;
 
 const { searchCurrentInfo } = require("./search-service");
+const { buildPersonalizedSafetyMessage } = require("./static-safety-message");
 
 function isFreshnessRequest(text) {
   const value = String(text || "").toLowerCase();
@@ -417,10 +418,15 @@ async function chatWithAssistant({
     };
   } catch (error) {
     console.error("OPENROUTER VOICE AI ERROR:", error?.message || error);
+    // OpenRouter failed → reply with the FULL static personalized safety message
+    // (based on the ACTUAL reading) instead of a bare error string.
     return {
       success: false,
       available: false,
-      reply: "",
+      reply: buildPersonalizedSafetyMessage(
+        language === "auto" ? "en" : language || "en",
+        telemetry || null
+      ),
       language: language || "auto",
       actions: [],
       sources: [],
@@ -469,10 +475,15 @@ async function generateProactiveGreeting({
     };
   } catch (error) {
     console.error("PROACTIVE VOICE AI ERROR:", error?.message || error);
+    // OpenRouter failed → still greet with the FULL static personalized safety
+    // message based on the ACTUAL telemetry.
     return {
       success: false,
       available: false,
-      reply: "",
+      reply: buildPersonalizedSafetyMessage(
+        language === "auto" ? "en" : language || "en",
+        telemetry || null
+      ),
       language: language || "rw",
       actions: [],
       errorCode: error?.code || "OPENROUTER_UNAVAILABLE",

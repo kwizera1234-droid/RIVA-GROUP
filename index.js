@@ -9,10 +9,12 @@ console.log(
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
+const { clerkMiddleware } = require("@clerk/express");
 const { analyzeTelemetry } = require("./ai-analysis-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
 const { generateInsight } = require("./ai-insight-service");
 const { searchCurrentInfo } = require("./search-service");
+const { buildPersonalizedSafetyMessage, buildStaticSafetyInsight } = require("./static-safety-message");
 
 const app = express();
 
@@ -21,6 +23,14 @@ const app = express();
 // ============================================================
 
 app.set("trust proxy", 1);
+
+// ============================================================
+// CLERK AUTH MIDDLEWARE
+// ============================================================
+
+app.use(clerkMiddleware());
+
+
 
 app.use(
   cors({
@@ -349,6 +359,22 @@ async function requireFirebaseAuth(
   res,
   next
 ) {
+  // Try Clerk authentication first.
+  try {
+    if (req.auth && req.auth.isAuthenticated && req.auth.userId) {
+      req.firebaseUser = {
+        uid: req.auth.userId,
+        clerkUserId: req.auth.userId,
+      };
+      return next();
+    }
+  } catch (error) {
+    console.error(
+      "CLERK AUTH CHECK ERROR:",
+      error.code || error.message
+    );
+  }
+
   if (!firebaseReady) {
     return res.status(503).json({
       status: "error",
@@ -2466,19 +2492,51 @@ app.post(
           available: result.available,
           error: result.error,
         });
-        return res.status(result.available === false ? 503 : 502).json({
+
+        // OpenRouter failed → still reply with the FULL static personalized
+        // safety message (based on the ACTUAL reading) so the user always
+        // receives real, measurement-based guidance instead of a bare error.
+        const staticReply =
+          typeof result.reply === "string" && result.reply.length > 0
+            ? result.reply
+            : buildPersonalizedSafetyMessage(
+                body.language === "auto" ? "en" : body.language || "en",
+                (context && context.telemetry) || null
+              );
+
+        return res.status(200).json({
           ...result,
-          status: "error",
+          success: true,
+          available: false,
+          status: "success",
+          source: "static",
+          reply: staticReply,
+          errorCode: result.errorCode || "OPENROUTER_UNAVAILABLE",
         });
       }
 
       return res.status(200).json(result);
     } catch (error) {
       console.error("AI CHAT ERROR:", error?.message || error);
-      return res.status(503).json({
-        status: "error",
+
+      // Backend/OpenRouter failure → reply with the FULL static safety message.
+      const staticReply =
+        buildPersonalizedSafetyMessage(
+          body.language === "auto" ? "en" : body.language || "en",
+          (context && context.telemetry) || null
+        );
+
+      return res.status(200).json({
+        success: true,
+        available: false,
+        status: "ok_static",
+        source: "static",
+        reply: staticReply,
         message: "AI ntabonetse ubu. Reba internet connection yawe.",
         code: "AI_UNAVAILABLE",
+        intent: "SAFETY_GUIDANCE",
+        actions: [],
+        sources: [],
       });
     }
   }
@@ -2514,24 +2572,50 @@ app.post(
           available: insightResult.available,
           error: insightResult.error,
         });
-        return res.status(
-          insightResult.available === false ? 503 : 502
-        ).json({
-          success: false,
-          available: insightResult.available,
-          status: "error",
+
+        // OpenRouter failed → still serve the FULL static personalized safety
+        // message (based on the ACTUAL reading) so the user always receives
+        // real, measurement-based guidance instead of a bare error.
+        const staticInsight =
+          (insightResult.staticInsight &&
+            typeof insightResult.staticInsight.message === "string" &&
+            insightResult.staticInsight.message.length > 0)
+            ? insightResult.staticInsight
+            : buildStaticSafetyInsight(
+                body.language || "rw",
+                body.currentReading || null
+              );
+
+        return res.status(200).json({
+          success: true,
+          available: false,
+          status: "success",
+          source: "static",
           message:
             insightResult.message || "AI insight temporarily unavailable",
+          insight: staticInsight,
         });
       }
 
       return res.status(200).json(insightResult);
     } catch (error) {
       console.error("AI INSIGHT ERROR:", error?.message || error);
-      return res.status(503).json({
-        status: "error",
+
+      // OpenRouter/backend failure → serve the FULL static safety message.
+      const staticInsight =
+        buildStaticSafetyInsight(
+          body.language || "rw",
+          body.currentReading || null
+        );
+
+      return res.status(200).json({
+        success: true,
+        available: false,
+        status: "success",
+        source: "static",
         message: "AI insight temporarily unavailable.",
         code: "AI_INSIGHT_UNAVAILABLE",
+        insight: staticInsight,
       });
     }
   }

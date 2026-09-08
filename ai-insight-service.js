@@ -5,6 +5,8 @@ const OPENROUTER_FALLBACK_MODELS = String(process.env.OPENROUTER_FALLBACK_MODELS
 const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || "https://soberwatch.app";
 const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME || "SoberWatch";
 
+const { buildStaticSafetyInsight, buildPersonalizedSafetyMessage } = require("./static-safety-message");
+
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_MS = 45000;
 
@@ -71,6 +73,8 @@ function buildInsightPrompt({ language, currentReading, recentReadings, deviceSt
     "Recent alerts: " + JSON.stringify(Array.isArray(alerts) ? alerts.slice(0, 8) : []),
     "Page the user is on: " + String(page || "dashboard"),
   ].join("\n");
+}
+
 async function generateInsight({
   language = "rw",
   currentReading = null,
@@ -84,8 +88,13 @@ async function generateInsight({
       success: false,
       available: false,
       message: "OpenRouter API key is not configured",
+      staticInsight: buildStaticSafetyInsight(language, currentReading),
     };
   }
+
+  // When OpenRouter is unavailable we still serve the FULL personalized safety
+  // message so the user always receives real, measurement-based guidance.
+  const staticFallbackInsight = () => buildStaticSafetyInsight(language, currentReading);
 
   try {
     const systemPrompt = "You are the SoberWatch AI Safety Insights engine. Return ONLY valid JSON. Never fabricate sensor data. Be evidence-based and concise.";
@@ -119,7 +128,12 @@ async function generateInsight({
     try {
       data = responseText ? JSON.parse(responseText) : {};
     } catch {
-      return { success: false, available: true, message: "OpenRouter returned an invalid response" };
+      return {
+        success: false,
+        available: true,
+        message: "OpenRouter returned an invalid response",
+        staticInsight: staticFallbackInsight(),
+      };
     }
 
     if (!response.ok) {
@@ -128,6 +142,7 @@ async function generateInsight({
         available: true,
         errorCode: `OPENROUTER_${response.status}`,
         message: data?.error?.message || data?.message || "OpenRouter AI temporarily unavailable",
+        staticInsight: staticFallbackInsight(),
       };
     }
 
@@ -141,7 +156,12 @@ async function generateInsight({
 
     const text = String(content || "").trim();
     if (!text) {
-      return { success: false, available: true, message: "OpenRouter returned an empty insight" };
+      return {
+        success: false,
+        available: true,
+        message: "OpenRouter returned an empty insight",
+        staticInsight: staticFallbackInsight(),
+      };
     }
 
     // Extract and validate the JSON object (tolerate markdown fences / extra prose).
@@ -175,6 +195,7 @@ async function generateInsight({
         recommendedAction: insight?.recommendedAction ? String(insight.recommendedAction) : null,
         relatedData: Array.isArray(insight?.relatedData) ? insight.relatedData : [],
         timestamp: Date.now(),
+        source: "ai",
       },
       generatedAt: Date.now(),
     };
@@ -184,6 +205,7 @@ async function generateInsight({
       success: false,
       available: true,
       message: "OpenRouter AI temporarily unavailable",
+      staticInsight: staticFallbackInsight(),
       error: process.env.NODE_ENV === "production" ? undefined : error?.message,
     };
   }
@@ -202,4 +224,3 @@ module.exports = {
   getInsightStatus,
   OPENROUTER_MODEL,
 };
-}
