@@ -9,6 +9,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -33,6 +34,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navDeepLink
+import com.example.crisis.ui.CrisisOnboardingScreen
+import com.example.crisis.ui.CrisisSatelliteTrackingScreen
+import com.example.crisis.ui.CrisisSettingsScreen
+import com.example.crisis.viewmodel.CrisisViewModel
 import com.example.data.preferences.AppTheme
 import com.example.ui.screens.alerts.AlertsScreen
 import com.example.ui.screens.auth.ForgotPasswordScreen
@@ -70,6 +75,10 @@ sealed class Screen(val route: String) {
   object History : Screen("history")
   object Contacts : Screen("contacts")
   object Reports : Screen("reports")
+  // Phase 1-3: Autonomous Emergency Automation (zero-touch crisis engine)
+  object CrisisShield : Screen("crisis_shield")
+  object CrisisSettings : Screen("crisis_settings")
+  object CrisisSetup : Screen("crisis_setup")
 }
 
 data class BottomNavItem(
@@ -80,10 +89,10 @@ data class BottomNavItem(
 
 val bottomNavItems = listOf(
   BottomNavItem("Home", Screen.Home.route, Icons.Default.Home),
+  BottomNavItem("Shield", Screen.CrisisShield.route, Icons.Default.Shield),
   BottomNavItem("Monitor", Screen.Trends.route, Icons.Default.MonitorHeart),
   BottomNavItem("AI Oracle", Screen.Assistant.route, Icons.Default.AutoGraph),
   BottomNavItem("Devices", Screen.Device.route, Icons.Default.BluetoothConnected),
-  BottomNavItem("Profile", Screen.Profile.route, Icons.Default.Person)
 )
 
 @Composable
@@ -106,6 +115,7 @@ fun SoberWatchApp(
 
     val showBottomBar = currentRoute in listOf(
       Screen.Home.route,
+      Screen.CrisisShield.route,
       Screen.Trends.route,
       Screen.Assistant.route,
       Screen.Device.route,
@@ -400,6 +410,32 @@ fun SoberWatchApp(
             recentReadings = recentReadings,
             userName = userProfile.name,
             onGenerateNewReport = { viewModel.generateNewReport() }
+          )
+        }
+        // ---- Autonomous Emergency Automation ----
+        // Premium cinematic satellite live-tracking ops center (spec: obsidian glass,
+        // radar sweep, distress beacon, telemetry HUD, dotted care route).
+        composable(Screen.CrisisShield.route) {
+          val crisisViewModel: CrisisViewModel = viewModel()
+          CrisisSatelliteTrackingScreen(
+            viewModel = crisisViewModel,
+            onNavigateBack = { navController.popBackStack() },
+            onNavigateToSettings = { navController.navigate(Screen.CrisisSettings.route) }
+          )
+        }
+        composable(Screen.CrisisSettings.route) {
+          CrisisSettingsScreen(
+            onNavigateBack = { navController.popBackStack() },
+            onOpenShield = { navController.navigate(Screen.CrisisShield.route) }
+          )
+        }
+        composable(Screen.CrisisSetup.route) {
+          CrisisOnboardingScreen(
+            onOnboardingComplete = {
+              navController.navigate(Screen.CrisisShield.route) {
+                popUpTo(Screen.CrisisSetup.route) { inclusive = true }
+              }
+            }
           )
         }
       }

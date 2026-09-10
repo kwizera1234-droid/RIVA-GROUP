@@ -12,7 +12,12 @@ data class SensorReading(
   val rssi: Int = 0,
   val isBleConnected: Boolean = false,
   val isWifiConnected: Boolean = false,
-  val overallHealthScore: Int = 0
+  val overallHealthScore: Int = 0,
+  val deviceId: String = "SW-001",
+  val sensorRaw: Int = 0,
+  val sensorResponse: Int = 0,
+  val status: String = "SAFE",
+  val source: String = "hardware"
 ) {
   companion object {
     fun defaultEcgWaveform(): List<Float> =

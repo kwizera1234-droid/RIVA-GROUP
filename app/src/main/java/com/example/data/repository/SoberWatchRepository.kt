@@ -174,6 +174,15 @@ class SoberWatchRepository(private val context: Context) {
                                 ecgStatus = doc.getString("ecgStatus") ?: "Stable",
                                 timestamp = doc.getLong("timestamp") ?: 0L,
                                 overallHealthScore = doc.getLong("overallHealthScore")?.toInt() ?: 0,
+                                deviceId = doc.getString("deviceId") ?: "SW-001",
+                                sensorRaw = doc.getLong("sensorRaw")?.toInt() ?: 0,
+                                sensorResponse = doc.getLong("sensorResponse")?.toInt() ?: 0,
+                                status = doc.getString("status") ?: when {
+                                    (doc.getDouble("alcoholBac") ?: 0.0) >= 0.08 -> "DANGER"
+                                    (doc.getDouble("alcoholBac") ?: 0.0) >= 0.02 -> "CAUTION"
+                                    else -> "SAFE"
+                                },
+                                source = doc.getString("source") ?: "hardware",
                                 isBleConnected = true
                             )
                         }
@@ -210,6 +219,15 @@ class SoberWatchRepository(private val context: Context) {
                       "spo2Percent" to reading.spo2Percent,
                       "tempCelsius" to reading.tempCelsius,
                       "ecgStatus" to reading.ecgStatus,
+                      "deviceId" to reading.deviceId,
+                      "sensorRaw" to reading.sensorRaw,
+                      "sensorResponse" to reading.sensorResponse,
+                      "status" to when {
+                          reading.alcoholBac >= 0.08 -> "DANGER"
+                          reading.alcoholBac >= 0.02 -> "CAUTION"
+                          else -> "SAFE"
+                      },
+                      "source" to reading.source,
                       "overallHealthScore" to reading.overallHealthScore
                   )
                   firestore.collection("users").document(user.uid).collection("readings").add(data)
