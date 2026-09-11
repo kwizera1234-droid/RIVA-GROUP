@@ -18,6 +18,10 @@ const {
 
 const app = express();
 
+// Parse JSON and URL-encoded request bodies before all API routes.
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
 // ============================================================
 // EMAIL TRANSPORT (Nodemailer)
 // ============================================================
