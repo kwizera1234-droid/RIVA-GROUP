@@ -1,50 +1,67 @@
 require("dotenv").config();
-
-console.log(
-  "OpenRouter environment check:",
-  Boolean(String(process.env.OPENROUTER_API_KEY || "").trim())
-);
-
-
+const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
-const { clerkMiddleware } = require("@clerk/express");
 const { analyzeTelemetry } = require("./ai-analysis-service");
 const { chatWithAssistant, generateProactiveGreeting } = require("./voice-ai-service");
 const { generateInsight } = require("./ai-insight-service");
 const { searchCurrentInfo } = require("./search-service");
 const { buildPersonalizedSafetyMessage, buildStaticSafetyInsight } = require("./static-safety-message");
+const {
+  makeEmergencyCall,
+  composeEmergencyMessage,
+  normalizePhoneNumber,
+  isVonageConfigured,
+} = require("./vonage-voice-service");
 
 const app = express();
 
 // ============================================================
-// CONFIGURATION
+// EMAIL TRANSPORT (Nodemailer)
 // ============================================================
 
-app.set("trust proxy", 1);
+let transporter = null;
+
+function getEmailTransporter() {
+  if (transporter) return transporter;
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = parseInt(process.env.SMTP_PORT || "587");
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+  const smtpSecure = process.env.SMTP_SECURE === "true";
+  if (!smtpHost || !smtpUser || !smtpPass) {
+    console.warn("[EMAIL] SMTP credentials not configured.");
+    return null;
+  }
+  transporter = nodemailer.createTransport({
+    host: smtpHost, port: smtpPort, secure: smtpSecure,
+    auth: { user: smtpUser, pass: smtpPass },
+    tls: { rejectUnauthorized: false },
+  });
+  console.log("[EMAIL] Nodemailer transport initialized.");
+  return transporter;
+}
 
 // ============================================================
-// CLERK AUTH MIDDLEWARE
+// OTP HELPERS
 // ============================================================
 
-app.use(clerkMiddleware());
+function generateSecureOTP() {
+  const bytes = crypto.randomBytes(3);
+  let otp = "";
+  for (let i = 0; i < 3; i++) otp += String(bytes[i] % 10);
+  return otp;
+}
 
+function hashOTP(otp) {
+  return crypto.createHash("sha256").update(otp + (process.env.OTP_PEPPER || "soberwatch-otp-secret")).digest("hex");
+}
 
-
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-API-Key",
-    ],
-  })
-);
-
-app.use(express.json({ limit: "2mb" }));
+function generateResetToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 // ============================================================
 // FIREBASE ADMIN
@@ -55,29 +72,17 @@ let firebaseReady = false;
 
 try {
   let serviceAccount;
-
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
   } else {
     serviceAccount = require("./firebase-backend/firebase-service-account.json");
   }
-
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   db = admin.firestore();
-
   firebaseReady = true;
-
-  console.log(
-    "Firebase Admin initialized successfully."
-  );
+  console.log("Firebase Admin initialized successfully.");
 } catch (error) {
-  console.error(
-    "Firebase Initialization Error:",
-    error.message
-  );
+  console.error("Firebase Initialization Error:", error.message);
 }
 
 // ============================================================
@@ -324,6 +329,13 @@ function cleanEmail(email) {
     .toLowerCase();
 }
 
+function validateEmailForOTP(email) {
+  const normalized = cleanEmail(email);
+  if (!normalized) return "Email is required";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return "Please enter a valid email address";
+  return null;
+}
+
 function getBearerToken(req) {
   const authorization =
     req.headers.authorization ||
@@ -359,27 +371,11 @@ async function requireFirebaseAuth(
   res,
   next
 ) {
-  // Try Clerk authentication first.
-  try {
-    if (req.auth && req.auth.isAuthenticated && req.auth.userId) {
-      req.firebaseUser = {
-        uid: req.auth.userId,
-        clerkUserId: req.auth.userId,
-      };
-      return next();
-    }
-  } catch (error) {
-    console.error(
-      "CLERK AUTH CHECK ERROR:",
-      error.code || error.message
-    );
-  }
-
   if (!firebaseReady) {
-    return res.status(503).json({
+    return res.status(401).json({
       status: "error",
       message:
-        "Firebase is not connected",
+        "Authentication required",
     });
   }
 
@@ -505,6 +501,28 @@ function simpleRateLimit(
 
 app.use(simpleRateLimit);
 
+// Per-user throttle for the paid Vonage emergency-call route:
+// max 3 outbound calls per user per 10 minutes (accident + redials,
+// never a runaway loop).
+const vonageCallHistory = new Map();
+const VONAGE_CALL_LIMIT = 3;
+const VONAGE_CALL_WINDOW_MS = 10 * 60 * 1000;
+
+function isVonageCallThrottled(uid) {
+  const now = Date.now();
+  const history = (vonageCallHistory.get(uid) || []).filter(
+    (timestamp) => now - timestamp < VONAGE_CALL_WINDOW_MS
+  );
+  vonageCallHistory.set(uid, history);
+  return history.length >= VONAGE_CALL_LIMIT;
+}
+
+function recordVonageCall(uid) {
+  const history = vonageCallHistory.get(uid) || [];
+  history.push(Date.now());
+  vonageCallHistory.set(uid, history);
+}
+
 // ============================================================
 // ROOT
 // ============================================================
@@ -556,6 +574,18 @@ app.get("/", (req, res) => {
       login:
         "POST /api/login",
 
+      forgotPasswordRequest:
+        "POST /api/forgot-password/request",
+
+      forgotPasswordVerify:
+        "POST /api/forgot-password/verify",
+
+      forgotPasswordReset:
+        "POST /api/forgot-password/reset",
+
+      passwordReset:
+        "POST /api/password-reset",
+
       readings:
         "GET /api/readings?uid=UID",
 
@@ -570,6 +600,12 @@ app.get("/", (req, res) => {
 
       emergency:
         "POST /api/emergency",
+
+      emergencyCall:
+        "POST /api/emergency/call",
+
+      emergencyContacts:
+        "GET|PUT /api/emergency-contacts",
 
       emergencies:
         "GET /api/emergencies?uid=UID",
@@ -898,6 +934,365 @@ app.post(
     }
   }
 );
+
+// ============================================================
+// FORGOT PASSWORD OTP SYSTEM
+// POST /api/forgot-password/request
+// POST /api/forgot-password/verify
+// POST /api/forgot-password/reset
+// ============================================================
+
+// Rate limiting for OTP requests (per IP)
+const otpRequestCounters = new Map();
+const OTP_RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
+const OTP_RATE_LIMIT_MAX = 3; // max 3 requests per minute per IP
+
+function isOTPRateLimited(ip) {
+  const now = Date.now();
+  const existing = otpRequestCounters.get(ip);
+  if (!existing || now - existing.startedAt > OTP_RATE_LIMIT_WINDOW_MS) {
+    otpRequestCounters.set(ip, { startedAt: now, count: 1 });
+    return false;
+  }
+  existing.count += 1;
+  if (existing.count > OTP_RATE_LIMIT_MAX) return true;
+  return false;
+}
+
+function cleanupExpiredOTPCounters() {
+  const now = Date.now();
+  for (const [ip, data] of otpRequestCounters.entries()) {
+    if (now - data.startedAt > OTP_RATE_LIMIT_WINDOW_MS) {
+      otpRequestCounters.delete(ip);
+    }
+  }
+}
+setInterval(cleanupExpiredOTPCounters, 120000);
+
+// Send OTP email
+async function sendOTPEmail(email, otp) {
+  const transporter = getEmailTransporter();
+  if (!transporter) throw new Error("EMAIL_SERVICE_UNAVAILABLE");
+
+  const senderName = process.env.EMAIL_FROM_NAME || "SoberWatch";
+  const senderEmail = process.env.EMAIL_FROM || "noreply@soberwatch.io";
+  const otpExpiration = parseInt(process.env.OTP_EXPIRATION_MINUTES || "10");
+  const frontendUrl = process.env.FRONTEND_URL || "https://soberwatch-newversion.onrender.com";
+
+  const otpHtml = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Your SoberWatch Verification Code</title>
+</head>
+<body style="margin:0;padding:0;background:#0B0D14;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<div style="max-width:600px;margin:0 auto;padding:20px;">
+<div style="background:linear-gradient(135deg,#0B0D14 0%,#1a1d2e 100%);border-radius:20px;padding:40px;border:1px solid rgba(212,175,55,0.3);">
+<div style="text-align:center;margin-bottom:30px;">
+<svg viewBox="0 0 200 200" width="80" height="80" style="display:inline-block;">
+<defs><linearGradient id="swGrad" x1="0" y1="100" x2="100" y2="200" gradientUnits="userSpaceOnUse"><stop offset="0%" stopColor="#7AC142"/><stop offset="100%" stopColor="#5CA626"/></linearGradient><linearGradient id="swGold" x1="0" y1="0" x2="200" y2="200" gradientUnits="userSpaceOnUse"><stop offset="0%" stopColor="#FFF6D6"/><stop offset="50%" stopColor="#D4AF37"/><stop offset="100%" stopColor="#AA820A"/></linearGradient></defs>
+<path d="M82 32C45 34 16 68 16 112C16 160 54 188 108 188C120 188 126 172 118 168C92 154 50 162 44 148C38 132 82 160 88 160C96 160 92 144 80 144C68 144 48 144 38 132C30 120 30 90 48 64C62 46 76 42 82 32Z" fill="url(#swGrad)"/>
+<circle cx="124" cy="42" r="16" fill="url(#swGold)"/>
+<path d="M106 164C114 138 138 98 190 42C172 68 148 106 126 128C118 100 114 74 110 6C104 36 90 92 84 104C84 104 100 134 106 164Z" fill="url(#swGold)"/>
+</svg>
+</div>
+<h1 style="color:#D4AF37;font-size:24px;margin:0 0 10px;font-family:serif;">Your SoberWatch Verification Code</h1>
+<p style="color:#999;font-size:14px;margin:0 0 30px;">We received a request to reset your SoberWatch password.</p>
+<div style="background:rgba(212,175,55,0.1);border:2px solid #D4AF37;border-radius:16px;padding:30px;text-align:center;margin-bottom:25px;">
+<div style="color:#D4AF37;font-size:48px;font-weight:bold;letter-spacing:12px;margin-bottom:10px;">${otp}</div>
+<p style="color:#666;font-size:12px;margin:0;">This code expires in ${otpExpiration} minutes</p>
+</div>
+<p style="color:#666;font-size:13px;margin:0 0 20px;">If you did not request this password reset, you can safely ignore this email.</p>
+<div style="border-top:1px solid rgba(255,255,255,0.1);padding-top:20px;text-align:center;">
+<p style="color:#D4AF37;font-size:14px;font-weight:bold;margin:0 0 5px;">SoberWatch</p>
+<p style="color:#555;font-size:11px;margin:0;">Biometric Telemetry & Safety Suite</p>
+</div>
+</div>
+</div>
+</body>
+</html>`;
+
+  const mailOptions = {
+    from: `"${senderName}" <${senderEmail}>`,
+    to: email,
+    subject: "Your SoberWatch Verification Code",
+    html: otpHtml,
+    text: `Your SoberWatch Verification Code: ${otp}\n\nThis code expires in ${otpExpiration} minutes.\n\nIf you did not request this password reset, you can safely ignore this email.\n\nSoberWatch`,
+  };
+
+  const info = await transporter.sendMail(mailOptions);
+  return info;
+}
+
+// OTP storage helpers
+async function storeOTP(email, otpHash, attempts) {
+  if (!db || !firebaseReady) throw new Error("FIREBASE_NOT_CONNECTED");
+  const otpDoc = db.collection("otp_codes").doc(email.toLowerCase().trim());
+  await otpDoc.set({
+    email: email.toLowerCase().trim(),
+    otpHash: otpHash,
+    attempts: 0,
+    maxAttempts: attempts || 5,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (parseInt(process.env.OTP_EXPIRATION_MINUTES || "10") * 60 * 1000))),
+    verified: false,
+  });
+}
+
+async function getStoredOTP(email) {
+  if (!db || !firebaseReady) throw new Error("FIREBASE_NOT_CONNECTED");
+  const otpDoc = await db.collection("otp_codes").doc(email.toLowerCase().trim()).get();
+  if (!otpDoc.exists) return null;
+  const data = otpDoc.data();
+  const expiresAt = data.expiresAt?.toDate();
+  if (expiresAt && expiresAt < new Date()) return null; // expired
+  return data;
+}
+
+async function invalidateOTP(email) {
+  if (!db || !firebaseReady) return;
+  await db.collection("otp_codes").doc(email.toLowerCase().trim()).delete();
+}
+
+async function storeResetToken(email, token) {
+  if (!db || !firebaseReady) throw new Error("FIREBASE_NOT_CONNECTED");
+  const tokenDoc = db.collection("reset_tokens").doc(token);
+  await tokenDoc.set({
+    email: email.toLowerCase().trim(),
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (parseInt(process.env.RESET_TOKEN_EXPIRATION_MINUTES || "15") * 60 * 1000))),
+    used: false,
+  });
+}
+
+async function getResetToken(token) {
+  if (!db || !firebaseReady) throw new Error("FIREBASE_NOT_CONNECTED");
+  const tokenDoc = await db.collection("reset_tokens").doc(token).get();
+  if (!tokenDoc.exists) return null;
+  const data = tokenDoc.data();
+  const expiresAt = data.expiresAt?.toDate();
+  if (expiresAt && expiresAt < new Date()) return null;
+  if (data.used) return null;
+  return data;
+}
+
+async function markResetTokenUsed(token) {
+  if (!db || !firebaseReady) return;
+  await db.collection("reset_tokens").doc(token).update({ used: true });
+}
+
+async function markOTPVerified(email) {
+  if (!db || !firebaseReady) return;
+  await db.collection("otp_codes").doc(email.toLowerCase().trim()).update({ verified: true });
+}
+
+app.post("/api/forgot-password/request", async (req, res) => {
+  const email = cleanEmail(req.body.email);
+
+  if (!email) {
+    return res.status(400).json({ status: "error", message: "Email is required" });
+  }
+
+  const emailError = validateEmailForOTP(email);
+  if (emailError) {
+    return res.status(400).json({ status: "error", message: emailError });
+  }
+
+  // Check rate limiting
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  if (isOTPRateLimited(ip)) {
+    return res.status(429).json({ status: "error", message: "Too many requests. Please wait a moment." });
+  }
+
+  if (!firebaseReady || !db) {
+    return res.status(503).json({ status: "error", message: "Firebase is not connected" });
+  }
+
+  try {
+    // Check if account exists
+    let userRecord;
+    try {
+      userRecord = await admin.auth().getUserByEmail(email);
+    } catch (error) {
+      if (error.code === "auth/user-not-found") {
+        // Return generic message to avoid account enumeration
+        return res.status(404).json({ status: "error", message: "No account found with this email address" });
+      }
+      throw error;
+    }
+
+    // Generate secure OTP
+    const otp = generateSecureOTP();
+    const otpHash = hashOTP(otp);
+
+    // Store hashed OTP in Firestore
+    await storeOTP(email, otpHash, 5);
+
+    // Send OTP email
+    try {
+      await sendOTPEmail(email, otp);
+      console.log(`[OTP] OTP email sent to ${email}. OTP not logged for security.`);
+    } catch (emailError) {
+      console.error("[OTP] Email delivery failed:", emailError.message);
+      // Invalidate OTP since email failed
+      await invalidateOTP(email);
+      return res.status(500).json({ status: "error", message: "Failed to deliver verification code. Please try again." });
+    }
+
+    return res.status(200).json({ status: "success", message: "Verification code sent to your email" });
+  } catch (error) {
+    console.error("[FORGOT-PASSWORD-REQUEST] Error:", error);
+    return res.status(500).json({ status: "error", message: "Internal server error" });
+  }
+});
+
+// Email test endpoint
+app.post("/api/email/test", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ status: "error", message: "Email is required" });
+  try {
+    const transporter = getEmailTransporter();
+    if (!transporter) return res.status(503).json({ status: "error", message: "Email service not configured" });
+    const testOtp = generateSecureOTP();
+    await sendOTPEmail(email, testOtp);
+    console.log(`[EMAIL TEST] Test email sent to ${email}. Test OTP (for debugging): ${testOtp}`);
+    return res.status(200).json({ status: "success", message: "Test email sent", otp: testOtp });
+  } catch (error) {
+    console.error("[EMAIL TEST] Failed:", error.message);
+    return res.status(500).json({ status: "error", message: `Email sending failed: ${error.message}` });
+  }
+});
+
+// Email config check endpoint
+app.get("/api/email/config", async (req, res) => {
+  const transporter = getEmailTransporter();
+  const configured = transporter !== null;
+  res.json({
+    status: configured ? "configured" : "not_configured",
+    smtpHost: process.env.SMTP_HOST || "not set",
+    smtpPort: process.env.SMTP_PORT || "not set",
+    senderEmail: process.env.EMAIL_FROM || "not set",
+    senderName: process.env.EMAIL_FROM_NAME || "not set",
+    configured: configured,
+    note: configured ? "Email is ready to send" : "SMTP credentials not configured. Email will fail.",
+  });
+});
+
+app.post("/api/forgot-password/verify", async (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    return res.status(400).json({ status: "error", message: "Email and OTP are required" });
+  }
+
+  if (!firebaseReady || !db) {
+    return res.status(503).json({ status: "error", message: "Firebase is not connected" });
+  }
+
+  try {
+    const storedOTP = await getStoredOTP(email);
+    if (!storedOTP) {
+      return res.status(400).json({ status: "error", message: "No verification code found. Please request a new one." });
+    }
+
+    // Check attempt limit
+    if (storedOTP.attempts >= storedOTP.maxAttempts) {
+      await invalidateOTP(email);
+      return res.status(429).json({ status: "error", message: "Too many verification attempts. Please request a new code." });
+    }
+
+    // Verify OTP
+    const otpHash = hashOTP(otp);
+    if (otpHash !== storedOTP.otpHash) {
+      // Increment attempts
+      await db.collection("otp_codes").doc(email.toLowerCase().trim()).update({
+        attempts: admin.firestore.FieldValue.increment(1),
+      });
+      return res.status(400).json({ status: "error", message: "Invalid verification code" });
+    }
+
+    // OTP verified! Mark as verified and issue reset token
+    await markOTPVerified(email);
+    const resetToken = generateResetToken();
+    await storeResetToken(email, resetToken);
+
+    // Invalidate the OTP after successful verification
+    await invalidateOTP(email);
+
+    return res.status(200).json({ status: "success", message: "Verification successful", resetToken });
+  } catch (error) {
+    console.error("[FORGOT-PASSWORD-VERIFY] Error:", error);
+    return res.status(500).json({ status: "error", message: "Internal server error" });
+  }
+});
+
+app.post("/api/forgot-password/reset", async (req, res) => {
+  const { resetToken, newPassword } = req.body;
+
+  if (!resetToken || !newPassword) {
+    return res.status(400).json({ status: "error", message: "Reset token and new password are required" });
+  }
+
+  if (!firebaseReady || !db) {
+    return res.status(503).json({ status: "error", message: "Firebase is not connected" });
+  }
+
+  // Validate password
+  if (newPassword.length < 8 || !/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+    return res.status(400).json({ status: "error", message: "Password must be at least 8 characters with uppercase, lowercase, and a number" });
+  }
+
+  try {
+    const resetData = await getResetToken(resetToken);
+    if (!resetData) {
+      return res.status(400).json({ status: "error", message: "Invalid or expired reset token" });
+    }
+
+    const email = resetData.email;
+
+    // Update password in Firebase Auth
+    const userRecord = await admin.auth().getUserByEmail(email);
+    await admin.auth().updateUser(userRecord.uid, { password: newPassword });
+
+    // Mark reset token as used
+    await markResetTokenUsed(resetToken);
+
+    // Invalidate any remaining OTP sessions
+    await invalidateOTP(email);
+
+    console.log(`[PASSWORD-RESET] Password successfully reset for ${email}`);
+
+    return res.status(200).json({ status: "success", message: "Password has been reset successfully" });
+  } catch (error) {
+    console.error("[FORGOT-PASSWORD-RESET] Error:", error);
+    return res.status(500).json({ status: "error", message: "Password reset failed" });
+  }
+});
+
+// Keep the old /api/password-reset endpoint for backward compatibility
+app.post("/api/password-reset", async (req, res) => {
+  const email = cleanEmail(req.body.email);
+  const password = String(req.body.password || "");
+
+  if (!email || !password) {
+    return res.status(400).json({ status: "error", message: "Email and password are required" });
+  }
+  if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+    return res.status(400).json({ status: "error", message: "Password must be at least 8 characters and include uppercase, lowercase, and a number" });
+  }
+  if (!firebaseReady) {
+    return res.status(503).json({ status: "error", message: "Firebase is not connected" });
+  }
+
+  try {
+    const userRecord = await admin.auth().getUserByEmail(email);
+    await admin.auth().updateUser(userRecord.uid, { password });
+    return res.status(200).json({ status: "success", message: "Password updated successfully" });
+  } catch (error) {
+    console.error("PASSWORD RESET ERROR:", error);
+    const message = error.code === "auth/user-not-found" ? "No account found with this email address" : "Password reset failed";
+    return res.status(error.code === "auth/user-not-found" ? 404 : 400).json({ status: "error", message });
+  }
+});
 
 // ============================================================
 // GET HEALTH
@@ -1248,7 +1643,7 @@ app.post(
     if (!validateDeviceKey(req) && (!bearerUid || bearerUid !== requestUid)) {
       return res.status(401).json({
         status: "error",
-        message: "Unauthorized: provide a valid device key or Firebase user token.",
+        message: "Unauthorized: provide a valid device key or authenticated user token.",
       });
     }
 
@@ -1989,6 +2384,8 @@ app.get(
 
 
 // ============================================================
+app.get("/api/emergency-contacts",requireFirebaseAuth,async(req,res)=>{const uid=req.firebaseUser.uid;const d=await db.collection("users").doc(uid).get();res.json({status:"success",contacts:d.data()?.emergencyContacts||[]})});
+app.put("/api/emergency-contacts",requireFirebaseAuth,async(req,res)=>{const uid=req.firebaseUser.uid,contacts=req.body?.contacts;if(!Array.isArray(contacts)||contacts.length>5)return res.status(400).json({status:"error",message:"Invalid contacts"});await db.collection("users").doc(uid).set({emergencyContacts:contacts,updatedAt:Date.now()},{merge:true});res.json({status:"success",contacts})});
 // OPENROUTER AI ANALYSIS
 // POST /api/ai/analyze
 //
@@ -2624,6 +3021,97 @@ app.post(
 // ============================================================
 // 404
 // ============================================================
+
+// ============================================================
+// VONAGE ZERO-TOUCH EMERGENCY CALL
+// POST /api/emergency/call
+//
+// The mobile app NEVER uses an Intent dialer. On AI-verified crisis
+// it POSTs here (Firebase Bearer auth) and Vonage places a real PSTN
+// voice call speaking a dynamic TTS announcement to the contact.
+// Body: { toNumber, message?, userName?, triggerType?, impactGforce?,
+//         speedKmh?, mapsUrl?, language? }
+// ============================================================
+
+app.post("/api/emergency/call", requireFirebaseAuth, async (req, res) => {
+  const uid = req.firebaseUser.uid;
+
+  if (isVonageCallThrottled(uid)) {
+    return res.status(429).json({
+      success: false,
+      message: "Emergency call limit reached. Please try again in a few minutes.",
+      code: "VONAGE_THROTTLED",
+    });
+  }
+
+  const body = req.body || {};
+  const toNumber = normalizePhoneNumber(body.toNumber);
+  if (!toNumber) {
+    return res.status(400).json({
+      success: false,
+      message: "A valid destination phone number (toNumber) is required.",
+      code: "INVALID_TO_NUMBER",
+    });
+  }
+
+  if (!isVonageConfigured()) {
+    return res.status(503).json({
+      success: false,
+      message: "Voice calling is not configured on the server. Use on-device dialing fallback.",
+      code: "VONAGE_NOT_CONFIGURED",
+    });
+  }
+
+  const announcement = composeEmergencyMessage({
+    message: body.message,
+    userName: body.userName,
+    triggerType: body.triggerType,
+    impactGforce: body.impactGforce,
+    speedKmh: body.speedKmh,
+    mapsUrl: body.mapsUrl,
+  });
+
+  try {
+    const result = await makeEmergencyCall(toNumber, {
+      message: announcement,
+      language: body.language || "en-US",
+    });
+    recordVonageCall(uid);
+
+    // Best-effort observability log; never fails the call response.
+    try {
+      if (db) {
+        await db.collection("users").doc(uid).collection("emergencies").add({
+          type: "VONAGE_CALL",
+          severity: "high",
+          contact: toNumber,
+          announcement,
+          callUuid:
+            (result && (result.uuid || result.id)) || null,
+          createdAt: Date.now(),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch (logError) {
+      console.error("Vonage call log write failed:", logError.message);
+    }
+
+    res.json({ success: true, toNumber, call: result || null });
+  } catch (error) {
+    console.error("Emergency call error:", error);
+    const status =
+      error.code === "INVALID_TO_NUMBER"
+        ? 400
+        : error.code === "VONAGE_NOT_CONFIGURED"
+          ? 503
+          : 502;
+    res.status(status).json({
+      success: false,
+      message: error.message || "Failed to place emergency call.",
+      code: error.code || "VONAGE_CALL_FAILED",
+    });
+  }
+});
 
 app.use(
   (req, res) => {

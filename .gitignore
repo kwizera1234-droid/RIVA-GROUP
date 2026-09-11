@@ -20,3 +20,4 @@ build/
 .gradle/
 *.apk
 node_modules/
+private.key
