@@ -1,0 +1,200 @@
+const CIRCUITNOTION_API_KEY = process.env.CIRCUITNOTION_API_KEY || "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
+
+const CIRCUITNOTION_URL =
+  process.env.CIRCUITNOTION_URL ||
+  "https://api.circuitnotion.com/v1/chat/completions";
+
+const OPENROUTER_URL =
+  process.env.OPENROUTER_URL ||
+  "https://openrouter.ai/api/v1/chat/completions";
+
+const CIRCUITNOTION_MODEL =
+  process.env.CIRCUITNOTION_MODEL || "circuit-2-turbo";
+
+const OPENROUTER_MODEL =
+  process.env.OPENROUTER_MODEL || "openrouter/free";
+
+async function requestProvider({
+  provider,
+  url,
+  apiKey,
+  model,
+  messages,
+  tools,
+  temperature = 0.2,
+  maxTokens = 700,
+}) {
+  if (!apiKey) {
+    throw new Error(`${provider} API key is not configured`);
+  }
+
+  const body = {
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+  };
+
+  if (Array.isArray(tools) && tools.length > 0) {
+    body.tools = tools;
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const providerMessage =
+      data?.error?.message ||
+      data?.message ||
+      text.slice(0, 300) ||
+      `HTTP ${response.status}`;
+
+    throw new Error(`${provider} request failed: ${response.status} ${providerMessage}`);
+  }
+
+  const message = data?.choices?.[0]?.message || {};
+
+  return {
+    provider,
+    model: data?.model || model,
+    message,
+    reply:
+      typeof message.content === "string"
+        ? message.content.trim()
+        : "",
+    toolCalls: Array.isArray(message.tool_calls)
+      ? message.tool_calls
+      : [],
+    sources: Array.isArray(data?.sources)
+      ? data.sources
+      : [],
+    raw: data,
+  };
+}
+
+/**
+ * SoberWatch shared AI provider.
+ *
+ * Primary: CircuitNotion
+ * Fallback: OpenRouter
+ *
+ * This service does NOT generate static AI answers.
+ * Every successful answer comes from a real AI provider.
+ */
+async function chatWithAI({
+  messages,
+  tools = [],
+  temperature = 0.2,
+  maxTokens = 700,
+}) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("AI messages are required");
+  }
+
+  let circuitNotionError = null;
+
+  // 1. PRIMARY: CIRCUITNOTION
+  if (CIRCUITNOTION_API_KEY) {
+    try {
+      const result = await requestProvider({
+        provider: "circuitnotion",
+        url: CIRCUITNOTION_URL,
+        apiKey: CIRCUITNOTION_API_KEY,
+        model: CIRCUITNOTION_MODEL,
+        messages,
+        tools,
+        temperature,
+        maxTokens,
+      });
+
+      console.log(
+        `AI PROVIDER SUCCESS: CircuitNotion (${result.model})`
+      );
+
+      return result;
+    } catch (error) {
+      circuitNotionError = error;
+      console.error(
+        "CIRCUITNOTION FAILED - trying OpenRouter fallback:",
+        error.message
+      );
+    }
+  } else {
+    circuitNotionError = new Error(
+      "CircuitNotion API key is not configured"
+    );
+    console.warn(
+      "CIRCUITNOTION API KEY MISSING - trying OpenRouter fallback"
+    );
+  }
+
+  // 2. FALLBACK: OPENROUTER
+  if (OPENROUTER_API_KEY) {
+    try {
+      const result = await requestProvider({
+        provider: "openrouter",
+        url: OPENROUTER_URL,
+        apiKey: OPENROUTER_API_KEY,
+        model: OPENROUTER_MODEL,
+        messages,
+        tools,
+        temperature,
+        maxTokens,
+      });
+
+      console.log(
+        `AI PROVIDER FALLBACK SUCCESS: OpenRouter (${result.model})`
+      );
+
+      return result;
+    } catch (error) {
+      console.error(
+        "OPENROUTER FALLBACK FAILED:",
+        error.message
+      );
+
+      throw new Error(
+        `All AI providers failed. CircuitNotion: ${circuitNotionError?.message || "unavailable"}. OpenRouter: ${error.message}`
+      );
+    }
+  }
+
+  throw new Error(
+    `No AI provider is configured. CircuitNotion: ${circuitNotionError?.message || "missing"}. OpenRouter API key is missing.`
+  );
+}
+
+function getAIProviderStatus() {
+  return {
+    circuitNotionConfigured: Boolean(CIRCUITNOTION_API_KEY),
+    circuitNotionModel: CIRCUITNOTION_MODEL,
+    openRouterConfigured: Boolean(OPENROUTER_API_KEY),
+    openRouterModel: OPENROUTER_MODEL,
+    primary: "circuitnotion",
+    fallback: "openrouter",
+  };
+}
+
+module.exports = {
+  chatWithAI,
+  getAIProviderStatus,
+  CIRCUITNOTION_MODEL,
+  OPENROUTER_MODEL,
+};
