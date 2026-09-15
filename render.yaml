@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: soberwatch
+    name: soberwatch-backend
     runtime: node
     plan: free
     rootDir: backend
