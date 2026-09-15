@@ -165,7 +165,8 @@ export function toolGetDrivingReadiness(): ToolResult {
 
 export function toolGetDrivingContext(): ToolResult {
   const reading = current();
-  const status = reading?.status ?? 'SAFE';
+  if (!reading) return { ok: false, error: 'No current telemetry is available.' };
+  const status = reading.status;
   const recentStatuses = readings().slice(-6).map((r) => r.status);
   return {
     ok: true,
@@ -173,7 +174,7 @@ export function toolGetDrivingContext(): ToolResult {
       currentStatus: status,
       recentStatuses,
       hasCriticalReading: recentStatuses.includes('DANGER'),
-      deviceId: reading?.deviceId ?? null,
+      deviceId: reading.deviceId,
     },
   };
 }
@@ -184,12 +185,13 @@ export function toolGetCurrentLocation(rawShareRequired = false): ToolResult {
   // coordinate is acquired by the share workflow to keep raw coordinates out
   // of prompt context.
   return {
-    ok: true,
+    ok: false,
     data: {
-      available: true,
+      available: false,
       shareRequiredByUser: rawShareRequired,
-      note: 'Fresh location is acquired only when the user explicitly requests it or during a triggered emergency.',
+      note: 'A fresh location is acquired only by the native location workflow.',
     },
+    error: 'Current GPS location is not available in telemetry context.',
   };
 }
 
@@ -230,7 +232,7 @@ export function toolGetRecentAlerts(): ToolResult {
   const critical = reading?.status === 'DANGER';
   return {
     ok: true,
-    data: { recentEvents: recent, currentStatusIsCritical: critical, currentStatus: reading?.status ?? 'SAFE' },
+    data: { recentEvents: recent, currentStatusIsCritical: critical, currentStatus: reading?.status ?? null },
   };
 }
 

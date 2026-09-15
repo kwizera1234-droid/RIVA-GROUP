@@ -21,6 +21,7 @@ export interface UserProfile {
   displayName?: string;
   isGuest?: boolean;
   photoUrl?: string;
+  emailVerified?: boolean;
 }
 
 export type ActiveScreen = 
@@ -28,6 +29,8 @@ export type ActiveScreen =
   | 'auth' 
   | 'verify' 
   | 'dashboard' 
+  | 'health'
+  | 'reports'
   | 'history' 
   | 'alerts'
   | 'settings'
@@ -48,18 +51,17 @@ export interface EmergencyContact {
   phone: string;
   email?: string;
   relationship?: string;
+  isActive?: boolean;
+  priority?: number;
   isPrimary?: boolean;
   isSecondary?: boolean;
 }
 
 export type EmergencyEventType = 
-  | 'manual_sos' 
   | 'crash' 
   | 'fall' 
-  | 'soberband' 
-  | 'critical_health' 
-  | 'backend_command'
-  | 'voice_emergency';
+  | 'soberband'
+  | 'critical_health';
 
 export type EmergencyState =
   | 'NORMAL'
@@ -69,7 +71,8 @@ export type EmergencyState =
   | 'CONFIRMED_EMERGENCY'
   | 'GET_LOCATION'
   | 'LOG_EVENT'
-  | 'CALL_CONTACT';
+  | 'CALL_CONTACT'
+  | 'FAILED';
 
 export interface EmergencyLocation {
   latitude: number;
@@ -92,24 +95,28 @@ export interface EmergencyEventRecord {
   mapsUrl?: string;
   contactName?: string;
   contactPhone?: string;
-  callStatus: 'pending' | 'success' | 'simulated' | 'failed' | 'cancelled';
-  callMode?: 'ACTION_CALL' | 'ACTION_DIAL' | 'TEST_SIMULATED' | 'WEB_TEL';
+  callStatus: 'pending' | 'success' | 'failed' | 'cancelled';
+  callMode?: 'ACTION_CALL' | 'ACTION_DIAL';
   notes?: string;
   backendLogged: boolean;
-  testMode?: boolean;
   recognizedText?: string;
+  detectionConfidence?: number;
+  detectionReason?: string;
 }
 
 export interface EmergencySettingsConfig {
-  primaryContact: EmergencyContact | null;
-  secondaryContact: EmergencyContact | null;
-  emergencyServiceNumber: string; // Default: '112' for Rwanda
-  sosCountdownSeconds: number; // Default: 10
+  contacts: EmergencyContact[];
+  emergencyServiceNumber: string;
+  emergencyServiceNumbers: string[];
+  simPreference: 'SIM_1' | 'SIM_2' | 'ASK' | 'AUTOMATIC';
   autoCountdownSeconds: number; // Default: 15
   crashDetectionEnabled: boolean; // Default: true
   fallDetectionEnabled: boolean; // Default: true
   crashSensitivity: 'low' | 'medium' | 'high'; // Default: 'medium'
-  isTestMode: boolean; // Default: false (true for dev testing)
+  cameraVerificationEnabled: boolean;
+  locationSharingEnabled: boolean;
+  satelliteDisplayEnabled: boolean;
+  emergencyMessage: string;
 }
 
 export interface NotificationPreferences {
@@ -122,27 +129,74 @@ export interface NotificationPreferences {
 
 export type Language = 'en' | 'rw' | 'sw' | 'fr';
 
+export interface VoiceIntentEntity {
+  contactTarget?: string;
+  contactName?: string;
+  contactPhone?: string;
+  action?: string;
+  clarification?: string;
+  message?: string;
+  contextContinuation?: string;
+}
+
 export type VoiceIntent =
   | 'NORMAL_CONVERSATION'
   | 'EMERGENCY_REQUEST'
   | 'CALL_PRIMARY_CONTACT'
   | 'CALL_SECONDARY_CONTACT'
   | 'CALL_CONTACT'
+  | 'SEND_VOICE_MESSAGE'
+  | 'STOP_CALL'
   | 'CANCEL_EMERGENCY'
   | 'CHECK_HEALTH'
+  | 'CHECK_HEART_RATE'
+  | 'CHECK_SPO2'
+  | 'CHECK_TEMPERATURE'
   | 'CHECK_DRIVING_READINESS'
   | 'CHECK_ALCOHOL_STATUS'
   | 'CHECK_LOCATION'
-  | 'GET_DAILY_REPORT'
+  | 'CHECK_REPORT'
+  | 'CHECK_ALERTS'
+  | 'CHECK_DEVICE_STATUS'
+  | 'SEARCH_WEB'
   | 'HELP'
+  | 'CLARIFICATION_REQUEST'
+  | 'GENERAL_QUESTION'
+  | 'SHARE_LOCATION'
+  | 'GET_DAILY_REPORT'
   | 'UNKNOWN_COMMAND';
+
+export interface AgentContextSources {
+  readings: () => TelemetryReading[];
+  currentReading: () => TelemetryReading | null;
+  contacts: () => EmergencyContact[];
+  primaryContact: () => EmergencyContact | null;
+  secondaryContact: () => EmergencyContact | null;
+  emergencyState?: () => string;
+  uid?: () => string;
+  deviceStatus?: () => { deviceId?: string; online?: boolean } | null;
+}
+
+export interface AgentTurnResult {
+  match: VoiceIntentMatch;
+  action: 'none' | 'call' | 'emergency' | 'share_location' | 'cancel_emergency' | 'end_call';
+  actionTarget?: {
+    name?: string;
+    phone?: string;
+    message?: string;
+    countdownSeconds?: number;
+  };
+}
 
 export type VoiceAssistantStatus = 
   | 'idle' 
   | 'listening' 
   | 'recognizing' 
   | 'processing' 
+  | 'tool_calling' 
   | 'speaking' 
+  | 'resuming_listening' 
+  | 'error_recovery' 
   | 'error';
 
 export type VoiceErrorCode =
@@ -175,13 +229,11 @@ export interface VoiceIntentMatch {
   rawText: string;
   normalizedText: string;
   detectedLanguage: Language;
-  extractedEntity?: {
-    contactTarget?: string;
-    contactName?: string;
-    contactPhone?: string;
-    action?: string;
-  };
+  extractedEntity?: VoiceIntentEntity;
   speechResponse: string;
+  toolsUsed?: string[];
+  requiresConfirmation?: boolean;
+  webSearchUsed?: boolean;
 }
 
 export interface VoiceAssistantConfig {

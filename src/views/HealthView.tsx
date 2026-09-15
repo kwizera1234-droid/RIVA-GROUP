@@ -50,12 +50,12 @@ const SkeletonBlock: React.FC<{ className?: string }> = ({ className = '' }) => 
 export const HealthView: React.FC<HealthViewProps> = ({ reading, readings, language, isLoading, error, onRetry }) => {
   const t = translations[language] || translations.en;
 
-  const status = (reading?.status ?? 'SAFE') as ReadingStatus;
+  const status = reading?.status;
   const statusMeta = {
     SAFE: { text: 'text-emerald-300', badge: 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300', label: t.statusSafe },
     CAUTION: { text: 'text-[#D4AF37]', badge: 'bg-amber-950/50 border-[#D4AF37]/30 text-[#D4AF37]', label: t.statusCaution },
     DANGER: { text: 'text-red-400', badge: 'bg-red-950/50 border-red-500/40 text-red-400', label: t.statusDanger },
-  }[status] || { text: 'text-white/60', badge: 'bg-white/5 border-white/15 text-white/60', label: status };
+  }[status as ReadingStatus] || { text: 'text-white/60', badge: 'bg-white/5 border-white/15 text-white/60', label: 'No status' };
 
   const history = useMemo(
     () => [...readings].filter((r) => r && typeof r.timestamp === 'number').sort((a, b) => b.timestamp - a.timestamp),

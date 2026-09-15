@@ -3,7 +3,6 @@ import { motion } from 'motion/react';
 import { AlertOctagon, ShieldCheck, AlertTriangle, Cpu, BellOff } from 'lucide-react';
 import { TelemetryReading, Language } from '../types';
 import { translations } from '../i18n/translations';
-import { SOSButton } from '../components/SOSButton';
 
 interface AlertsProps {
   currentReading: TelemetryReading | null;
@@ -52,7 +51,7 @@ export const AlertsView: React.FC<AlertsProps> = ({
                     {t.activeDangerAlert}
                   </h3>
                   <div className="text-xs font-mono text-red-300/80 mt-0.5 flex items-center gap-2">
-                    <span>{t.deviceId}: {currentReading.deviceId || 'SW-001'}</span>
+                    <span>{t.deviceId}: {currentReading.deviceId}</span>
                     <span>•</span>
                     <span>{new Date(currentReading.timestamp).toLocaleTimeString()}</span>
                   </div>
@@ -97,11 +96,6 @@ export const AlertsView: React.FC<AlertsProps> = ({
             </div>
           </motion.div>
         )}
-      </div>
-
-      {/* SOS Emergency Quick Trigger */}
-      <div>
-        <SOSButton language={language} size="large" />
       </div>
 
       {/* Section 2: Alert History (Generated ONLY from actual backend readings with DANGER status) */}
@@ -155,7 +149,7 @@ export const AlertsView: React.FC<AlertsProps> = ({
                     <div className="text-[11px] font-mono text-white/40 flex items-center gap-3">
                       <span className="flex items-center gap-1">
                         <Cpu className="w-3 h-3 text-red-400" />
-                        {alertItem.deviceId || 'SW-001'}
+                        {alertItem.deviceId}
                       </span>
                       {alertItem.sensorRaw > 0 && <span>{t.sensorRaw}: {alertItem.sensorRaw}</span>}
                     </div>

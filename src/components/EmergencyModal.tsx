@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   AlertOctagon, 
@@ -9,12 +9,12 @@ import {
   ShieldAlert, 
   ExternalLink,
   Cpu,
-  FlaskConical,
   CheckCircle2,
   AlertTriangle
 } from 'lucide-react';
 import { EmergencyState, EmergencyEventRecord, Language } from '../types';
 import { emergencyService } from '../services/emergencyService';
+import { SoberWatchEmergency } from '../services/nativeBridge';
 import { translations } from '../i18n/translations';
 
 interface EmergencyModalProps {
@@ -26,6 +26,9 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
   const [state, setState] = useState<EmergencyState>(emergencyService.getState());
   const [event, setEvent] = useState<EmergencyEventRecord | null>(emergencyService.getCurrentEvent());
   const [secondsRemaining, setSecondsRemaining] = useState<number>(emergencyService.getSecondsRemaining());
+  const [cameraStatus, setCameraStatus] = useState<'disabled' | 'requesting' | 'available' | 'unavailable'>('disabled');
+  const cameraAttemptEventRef = useRef<string | null>(null);
+  const sharedEventRef = useRef<string | null>(null);
   const config = emergencyService.getConfig();
   const t = translations[language] || translations.en;
 
@@ -38,6 +41,51 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (state === 'NORMAL' || !config.cameraVerificationEnabled || !event) {
+      setCameraStatus('disabled');
+      if (state === 'NORMAL') cameraAttemptEventRef.current = null;
+      return;
+    }
+    if (cameraAttemptEventRef.current === event.id) return;
+    cameraAttemptEventRef.current = event.id;
+
+    let active = true;
+    setCameraStatus('requesting');
+    SoberWatchEmergency.captureEvidence()
+      .then((result) => {
+        if (active) setCameraStatus(result.success ? 'available' : 'unavailable');
+      })
+      .catch(() => {
+        if (active) setCameraStatus('unavailable');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [state, config.cameraVerificationEnabled]);
+
+  useEffect(() => {
+    if (!event || state !== 'CALL_CONTACT' || event.latitude === undefined || event.longitude === undefined || sharedEventRef.current === event.id) return;
+    sharedEventRef.current = event.id;
+    SoberWatchEmergency.shareIncident({
+      phoneNumber: event.contactPhone,
+      latitude: event.latitude,
+      longitude: event.longitude,
+      timestamp: event.unixTimestamp,
+    }).catch((error) => {
+      console.warn('Native incident sharing unavailable:', error);
+    });
+  }, [state, event?.id, event?.latitude, event?.longitude, event?.unixTimestamp]);
+
+  useEffect(() => {
+    if (state !== 'EMERGENCY_DETECTED') return;
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance('Possible accident detected. Are you okay?'));
+    }
+  }, [state]);
+
   if (state === 'NORMAL') {
     return null;
   }
@@ -45,20 +93,18 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
   const isCountdown = state === 'COUNTDOWN' || state === 'EMERGENCY_DETECTED';
   const isCalling = state === 'CALL_CONTACT' || state === 'GET_LOCATION' || state === 'LOG_EVENT' || state === 'CONFIRMED_EMERGENCY';
   const isCancelled = state === 'CANCELLED';
+  const isFailed = state === 'FAILED';
 
-  const totalSeconds = event?.type === 'manual_sos' 
-    ? config.sosCountdownSeconds 
-    : config.autoCountdownSeconds;
+  const totalSeconds = config.autoCountdownSeconds;
   const progressPercent = totalSeconds > 0 ? (secondsRemaining / totalSeconds) * 100 : 0;
 
-  const targetName = event?.contactName || config.primaryContact?.name || 'Emergency Services (112)';
-  const targetPhone = event?.contactPhone || config.primaryContact?.phone || config.emergencyServiceNumber || '112';
+  const targetName = event?.contactName || emergencyService.getActiveContacts()[0]?.name || 'No active emergency contact';
+  const targetPhone = event?.contactPhone || emergencyService.getActiveContacts()[0]?.phone || 'Not configured';
 
   const formatEventType = (type?: string) => {
     switch (type) {
       case 'crash': return 'Severe Vehicle Collision Detected';
       case 'fall': return 'Sudden Fall & Ground Impact';
-      case 'manual_sos': return 'Emergency SOS Trigger';
       case 'critical_health': return 'Critical Biometric Threshold';
       case 'soberband': return 'SoberBand Hardware Emergency Signal';
       default: return 'Emergency Signal Triggered';
@@ -72,32 +118,27 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6 bg-black/90 backdrop-blur-xl overflow-y-auto"
+        className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-xl overflow-y-auto"
       >
         <motion.div
           id="emergency-modal-container"
           initial={{ scale: 0.9, y: 20 }}
           animate={{ scale: 1, y: 0 }}
           exit={{ scale: 0.9, y: 20 }}
-          className="relative w-full max-w-lg rounded-[28px] bg-black/95 border-2 border-red-500/80 shadow-[0_0_80px_rgba(239,68,68,0.45)] p-6 sm:p-8 space-y-6 text-center overflow-hidden"
+          className="relative min-h-screen w-full bg-black/95 border-2 border-red-500/80 shadow-[0_0_80px_rgba(239,68,68,0.45)] p-5 sm:p-8 space-y-6 text-center overflow-hidden"
         >
           {/* Ambient red pulsating background glow */}
           <div className="absolute -top-32 -left-32 w-64 h-64 bg-red-600/30 rounded-full blur-[90px] pointer-events-none animate-pulse" />
           <div className="absolute -bottom-32 -right-32 w-64 h-64 bg-red-600/30 rounded-full blur-[90px] pointer-events-none animate-pulse" />
 
           {/* Test Mode Top Ribbon */}
-          {config.isTestMode && (
-            <div className="inline-flex items-center gap-1.5 px-4 py-1 rounded-full bg-[#D4AF37]/20 border border-[#D4AF37]/50 text-[#D4AF37] text-xs font-mono font-bold tracking-wide">
-              <FlaskConical className="w-3.5 h-3.5" />
-              <span>{t.testModeBadge}</span>
-            </div>
-          )}
-
           {/* Header Icon & Title */}
           <div className="space-y-2">
             <div className="mx-auto w-20 h-20 rounded-full bg-red-500/20 border-2 border-red-500/60 flex items-center justify-center shadow-[0_0_30px_rgba(239,68,68,0.5)]">
               {isCancelled ? (
                 <CheckCircle2 className="w-10 h-10 text-emerald-400" />
+              ) : isFailed ? (
+                <AlertTriangle className="w-10 h-10 text-amber-300" />
               ) : isCalling ? (
                 <PhoneCall className="w-10 h-10 text-red-400 animate-bounce" />
               ) : (
@@ -106,11 +147,11 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
             </div>
 
             <h2 className="font-luxury text-2xl sm:text-3xl font-bold text-white tracking-wide">
-              {isCancelled ? 'EMERGENCY CANCELLED' : t.sosActiveTitle}
+              {isCancelled ? 'EMERGENCY CANCELLED' : isFailed ? 'EMERGENCY NEEDS ACTION' : 'POSSIBLE EMERGENCY DETECTED'}
             </h2>
 
             <p className="text-xs font-mono text-red-300/80 max-w-md mx-auto">
-              {event?.notes || formatEventType(event?.type)}
+              {event?.detectionReason || event?.notes || formatEventType(event?.type)}
             </p>
           </div>
 
@@ -159,7 +200,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
                   Calling <strong className="text-white">{targetName}</strong> ({targetPhone}) automatically.
                 </div>
                 <div className="text-[11px] text-amber-300 font-semibold mt-1.5 flex items-center justify-center gap-1.5">
-                  <span>🎙️ Voice Stop: Vuga &quot;Hagarika&quot; cyangwa &quot;Cancel&quot; guhagarika</span>
+                    <span>Voice confirmation is active. Say &quot;Cancel&quot; or use the button.</span>
                 </div>
               </div>
             </div>
@@ -171,7 +212,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
               <div className="flex items-center justify-between">
                 <span className="text-white/60">Call Status:</span>
                 <span className="px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 font-bold">
-                  {event?.callStatus === 'simulated' ? 'SIMULATED (TEST)' : event?.callStatus === 'success' ? 'CONNECTED / ACTIVE' : 'CALLING...'}
+                  {event?.callStatus === 'success' ? 'CALL INITIATED' : event?.callStatus === 'failed' ? 'FAILED / NEEDS ACTION' : 'CALLING...'}
                 </span>
               </div>
 
@@ -195,6 +236,17 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
           )}
 
           {/* GPS Coordinates Badge */}
+          {event?.latitude !== undefined && event.longitude !== undefined && (
+            <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black/50 text-left">
+              <iframe
+                title="Current emergency location map"
+                className="h-56 w-full border-0 grayscale contrast-125 opacity-90"
+                src={`https://www.openstreetmap.org/export/embed.html?bbox=${event.longitude - 0.01}%2C${event.latitude - 0.01}%2C${event.longitude + 0.01}%2C${event.latitude + 0.01}&layer=mapnik&marker=${event.latitude}%2C${event.longitude}`}
+              />
+              <div className="absolute left-3 top-3 rounded-lg bg-black/80 px-2 py-1 text-[10px] font-mono uppercase tracking-[0.14em] text-white/80">Real map location</div>
+              <div className="border-t border-white/10 p-2 text-[10px] font-mono text-amber-200/80">Satellite imagery unavailable in the embedded provider. The marker and coordinates are real; open Maps for satellite view.</div>
+            </div>
+          )}
           <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/10 text-xs font-mono text-white/70 space-y-1.5 text-left">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-[#D4AF37]">
@@ -233,6 +285,22 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
               </div>
             )}
           </div>
+
+          {config.cameraVerificationEnabled && (
+            <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3 text-left">
+              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.16em] text-white/60">
+                <span>Camera evidence</span>
+                <span className={cameraStatus === 'available' ? 'text-emerald-300' : cameraStatus === 'unavailable' ? 'text-amber-300' : 'text-white/50'}>
+                  {cameraStatus === 'available' ? 'AVAILABLE' : cameraStatus === 'requesting' ? 'REQUESTING' : cameraStatus === 'unavailable' ? 'UNAVAILABLE' : 'DISABLED'}
+                </span>
+              </div>
+              <p className="mt-2 text-[10px] font-mono text-white/40">
+                {cameraStatus === 'available'
+                  ? 'Evidence capture completed with the Android system camera.'
+                  : 'Android requires a visible, user-approved camera activity; silent background capture is not permitted.'}
+              </p>
+            </div>
+          )}
 
           {/* Large CANCEL Button */}
           {isCountdown ? (

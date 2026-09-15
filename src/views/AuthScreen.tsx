@@ -1,10 +1,17 @@
 import React, { useState, useRef } from 'react';
 import { motion } from 'motion/react';
 import { Mail, Lock, Camera, Trash2, User, UploadCloud } from 'lucide-react';
-import { apiLogin, apiRegister } from '../services/api';
 import { UserProfile, Language } from '../types';
 import { SoberWatchLogo } from '../components/SoberWatchLogo';
 import { translations } from '../i18n/translations';
+import {
+  firebaseErrorMessage,
+  registerWithEmail,
+  resendVerificationEmail,
+  signInWithEmail,
+  signInWithGoogle,
+  userToProfile,
+} from '../services/firebase';
 
 interface AuthProps {
   onSuccess: (user: UserProfile) => void;
@@ -91,54 +98,49 @@ export const AuthScreen: React.FC<AuthProps> = ({
       if (photoUrl) {
         localStorage.setItem('soberwatch_temp_avatar', photoUrl);
       }
-      const res = await apiRegister(email, password);
-      setIsLoading(false);
-      if (res.success) {
+      try {
+        await registerWithEmail(email, password, name.trim() || undefined);
+        await resendVerificationEmail();
         onRequireVerification(email);
-      } else {
-        setErrorMessage(res.message || 'Registration failed');
+      } catch (error) {
+        setErrorMessage(firebaseErrorMessage(error));
+      } finally {
+        setIsLoading(false);
       }
     } else {
-      const res = await apiLogin(email, password);
-      setIsLoading(false);
-      if (res.success) {
+      try {
+        const firebaseUser = await signInWithEmail(email, password);
         const savedAvatar = photoUrl || localStorage.getItem('soberwatch_temp_avatar') || undefined;
         onSuccess({
-          uid: res.uid || 'test-user',
-          email: res.email || email,
-          displayName: name || email.split('@')[0],
+          ...userToProfile(firebaseUser),
           photoUrl: savedAvatar,
-          isGuest: false
         });
-      } else {
-        setErrorMessage(res.message || 'Login failed');
+      } catch (error) {
+        setErrorMessage(firebaseErrorMessage(error));
+      } finally {
+        setIsLoading(false);
       }
     }
   };
 
-  const handleGoogleSignIn = () => {
+  const handleGoogleSignIn = async () => {
     setIsLoading(true);
-    setTimeout(() => {
+    try {
+      const firebaseUser = await signInWithGoogle();
       const savedAvatar = photoUrl || localStorage.getItem('soberwatch_temp_avatar') || undefined;
       onSuccess({
-        uid: 'google-user-' + Math.random().toString(36).substring(2, 7),
-        email: 'user@gmail.com',
-        displayName: name || 'Google User',
+        ...userToProfile(firebaseUser),
         photoUrl: savedAvatar,
-        isGuest: false
       });
-    }, 400);
+    } catch (error) {
+      setErrorMessage(firebaseErrorMessage(error));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleGuestLogin = () => {
-    const savedAvatar = photoUrl || localStorage.getItem('soberwatch_temp_avatar') || undefined;
-    onSuccess({
-      uid: 'test-user',
-      email: 'guest@soberwatch.io',
-      displayName: t.guestLogin,
-      photoUrl: savedAvatar,
-      isGuest: true
-    });
+    setErrorMessage('Guest access is unavailable because telemetry requires an authenticated Firebase account.');
   };
 
   return (

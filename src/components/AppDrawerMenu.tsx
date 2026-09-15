@@ -172,7 +172,7 @@ export const AppDrawerMenu: React.FC<AppDrawerMenuProps> = ({
 
                   <div className="text-right">
                     <span className="text-[10px] font-mono text-[#D4AF37] bg-[#D4AF37]/10 px-2 py-0.5 rounded-full border border-[#D4AF37]/20">
-                      {deviceId || 'SW-001'}
+                      {deviceId || 'Unavailable'}
                     </span>
                   </div>
                 </div>

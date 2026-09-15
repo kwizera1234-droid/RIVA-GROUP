@@ -246,7 +246,7 @@ export const SettingsView: React.FC<SettingsProps> = ({
                 {user?.email || 'guest@soberwatch.io'}
               </div>
               <div className="text-[10px] font-mono text-white/30 mt-0.5">
-                UID: {user?.uid || 'test-user'}
+                UID: {user?.uid || 'Unavailable'}
               </div>
             </div>
           </div>
@@ -350,7 +350,7 @@ export const SettingsView: React.FC<SettingsProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-mono">
           <div className="p-3.5 rounded-[16px] bg-white/[0.02] border border-white/5">
             <div className="text-white/40 text-[10px]">{t.deviceId}</div>
-            <div className="font-semibold text-white mt-1">{deviceId || 'SW-001'}</div>
+            <div className="font-semibold text-white mt-1">{deviceId || 'Unavailable'}</div>
           </div>
 
           <div className="p-3.5 rounded-[16px] bg-white/[0.02] border border-white/5">

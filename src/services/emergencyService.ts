@@ -7,23 +7,26 @@ import {
   EmergencySettingsConfig, 
   EmergencyContact 
 } from '../types';
-import { triggerNativeEmergencyCall } from './nativeBridge';
+import { SoberWatchEmergency, syncNativeMonitoring, triggerNativeEmergencyCall } from './nativeBridge';
 import { apiSendEmergencyEvent, saveLocalEmergencyEvent } from './api';
+import { resolveAuthenticatedUid } from './firebase';
 
 const EMERGENCY_CONFIG_KEY = 'soberwatch_emergency_config';
 const CONTACTS_KEY = 'soberwatch_contacts';
 
-// Default emergency configuration
 const DEFAULT_CONFIG: EmergencySettingsConfig = {
-  primaryContact: null,
-  secondaryContact: null,
-  emergencyServiceNumber: '112', // Rwanda National Emergency Service
-  sosCountdownSeconds: 10,
+  contacts: [],
+  emergencyServiceNumber: '',
+  emergencyServiceNumbers: [],
+  simPreference: 'AUTOMATIC',
   autoCountdownSeconds: 15,
   crashDetectionEnabled: true,
   fallDetectionEnabled: true,
   crashSensitivity: 'medium',
-  isTestMode: false,
+  cameraVerificationEnabled: false,
+  locationSharingEnabled: true,
+  satelliteDisplayEnabled: true,
+  emergencyMessage: 'SoberWatch detected a possible emergency. Please respond immediately.',
 };
 
 type StateChangeListener = (state: EmergencyState, event: EmergencyEventRecord | null, secondsLeft: number) => void;
@@ -39,17 +42,15 @@ class EmergencyService {
   private sirenOscillator: OscillatorNode | null = null;
   private sirenGain: GainNode | null = null;
 
-  // Sensor state for crash & fall detection
-  private isMotionListening = false;
-  private lastHighImpactTime = 0;
-  private motionSampleBuffer: { time: number; mag: number }[] = [];
-  private potentialCrashCandidate: { time: number; peakMag: number } | null = null;
-  private freeFallStartTime: number | null = null;
   private lastKnownLocation: EmergencyLocation | null = null;
+  private nativePollingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.config = this.loadConfig();
-    this.initSensors();
+    void syncNativeMonitoring(this.config);
+    this.nativePollingTimer = setInterval(() => {
+      void this.consumeNativeAccidentSignal();
+    }, 1500);
   }
 
   public getConfig(): EmergencySettingsConfig {
@@ -59,6 +60,7 @@ class EmergencyService {
   public updateConfig(partial: Partial<EmergencySettingsConfig>) {
     this.config = { ...this.config, ...partial };
     this.saveConfig();
+    void syncNativeMonitoring(this.config);
   }
 
   private loadConfig(): EmergencySettingsConfig {
@@ -73,17 +75,28 @@ class EmergencyService {
 
       if (saved) {
         const parsed = JSON.parse(saved);
+        const savedContacts = Array.isArray(parsed.contacts) ? parsed.contacts : contacts;
         return {
           ...DEFAULT_CONFIG,
           ...parsed,
-          primaryContact: parsed.primaryContact || contacts.find((c) => c.isPrimary) || contacts[0] || null,
-          secondaryContact: parsed.secondaryContact || contacts.find((c) => c.isSecondary) || (contacts.length > 1 ? contacts[1] : null),
+          emergencyServiceNumber: '',
+          emergencyServiceNumbers: [],
+          contacts: savedContacts.map((contact: EmergencyContact, index: number) => ({
+            ...contact,
+            isActive: contact.isActive ?? Boolean(contact.isPrimary || contact.isSecondary || index === 0),
+            priority: contact.priority ?? index,
+          })),
         };
       } else if (contacts.length > 0) {
         return {
           ...DEFAULT_CONFIG,
-          primaryContact: contacts.find((c) => c.isPrimary) || contacts[0] || null,
-          secondaryContact: contacts.find((c) => c.isSecondary) || (contacts.length > 1 ? contacts[1] : null),
+          emergencyServiceNumber: '',
+          emergencyServiceNumbers: [],
+          contacts: contacts.map((contact, index) => ({
+            ...contact,
+            isActive: contact.isActive ?? Boolean(contact.isPrimary || contact.isSecondary || index === 0),
+            priority: contact.priority ?? index,
+          })),
         };
       }
     } catch {}
@@ -109,11 +122,29 @@ class EmergencyService {
   }
 
   public getPrimaryContact(): EmergencyContact | null {
-    return this.config.primaryContact;
+    return this.getActiveContacts()[0] || null;
   }
 
   public getSecondaryContact(): EmergencyContact | null {
-    return this.config.secondaryContact;
+    return this.getActiveContacts()[1] || null;
+  }
+
+  public getContacts(): EmergencyContact[] {
+    let contacts = this.config.contacts;
+    try {
+      const saved = localStorage.getItem(CONTACTS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) contacts = parsed;
+      }
+    } catch {
+      contacts = [];
+    }
+    return [...contacts].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  }
+
+  public getActiveContacts(): EmergencyContact[] {
+    return this.getContacts().filter((contact) => contact.isActive);
   }
 
   public getState(): EmergencyState {
@@ -133,7 +164,7 @@ class EmergencyService {
    */
   public async triggerEmergency(
     type: EmergencyEventType,
-    options?: { customCountdown?: number; notes?: string; uid?: string; recognizedText?: string }
+    options?: { customCountdown?: number; notes?: string; uid?: string; recognizedText?: string; location?: EmergencyLocation }
   ) {
     // Prevent duplicate triggers if already in countdown or confirmed
     if (
@@ -148,12 +179,11 @@ class EmergencyService {
     }
 
     const eventId = `emg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    const isManual = type === 'manual_sos';
-    const countdownDuration = options?.customCountdown ?? (isManual ? this.config.sosCountdownSeconds : this.config.autoCountdownSeconds);
+    const countdownDuration = options?.customCountdown ?? this.config.autoCountdownSeconds;
 
-    const targetContact = this.config.primaryContact || this.config.secondaryContact;
-    const targetPhone = targetContact?.phone || this.config.emergencyServiceNumber || '112';
-    const targetName = targetContact?.name || 'Emergency Services (112)';
+    const targetContact = this.getActiveContacts()[0];
+    const targetPhone = targetContact?.phone || '';
+    const targetName = targetContact?.name || 'Configured emergency contact';
 
     this.currentEvent = {
       id: eventId,
@@ -165,10 +195,18 @@ class EmergencyService {
       contactPhone: targetPhone,
       callStatus: 'pending',
       backendLogged: false,
-      testMode: this.config.isTestMode,
       recognizedText: options?.recognizedText,
-      notes: options?.notes || (isManual ? 'Emergency SOS triggered by user' : `Automatic emergency detection: ${type}`),
+      notes: options?.notes || `Automatic emergency detection: ${type}`,
+      detectionReason: options?.notes,
     };
+
+    if (options?.location) {
+      this.lastKnownLocation = options.location;
+      this.currentEvent.latitude = options.location.latitude;
+      this.currentEvent.longitude = options.location.longitude;
+      this.currentEvent.accuracy = options.location.accuracy;
+      this.currentEvent.mapsUrl = options.location.mapsUrl;
+    }
 
     this.currentState = 'EMERGENCY_DETECTED';
     this.secondsRemaining = Math.max(1, countdownDuration);
@@ -233,7 +271,18 @@ class EmergencyService {
   /**
    * Confirmed emergency workflow execution.
    */
-  private async confirmAndDispatchEmergency(uid = 'test-user') {
+  private async confirmAndDispatchEmergency(uid?: string) {
+    const authenticatedUid = uid || await resolveAuthenticatedUid();
+    if (!authenticatedUid) {
+      this.currentState = 'FAILED';
+      if (this.currentEvent) {
+        this.currentEvent.state = 'FAILED';
+        this.currentEvent.notes = `${this.currentEvent.notes || ''} | Authentication required to log emergency`;
+        saveLocalEmergencyEvent(this.currentEvent);
+      }
+      this.notify();
+      return;
+    }
     this.stopAudioAlarm();
     this.currentState = 'CONFIRMED_EMERGENCY';
     if (this.currentEvent) {
@@ -269,7 +318,7 @@ class EmergencyService {
     if (this.currentEvent) {
       try {
         const backendRes = await apiSendEmergencyEvent({
-          uid,
+          uid: authenticatedUid,
           eventId: this.currentEvent.id,
           type: this.currentEvent.type,
           severity: 'high',
@@ -294,23 +343,36 @@ class EmergencyService {
     if (this.currentEvent) this.currentEvent.state = 'CALL_CONTACT';
     this.notify();
 
-    const targetPhone = this.currentEvent?.contactPhone || this.config.primaryContact?.phone || this.config.emergencyServiceNumber || '112';
+    const callTargets = this.getActiveContacts().map((contact) => ({ name: contact.name, phone: contact.phone }))
+      .filter((target, index, list) => list.findIndex((candidate) => candidate.phone === target.phone) === index);
 
     try {
-      const isServiceNumber = this.isPublicEmergencyServiceNumber(targetPhone);
-      const callResult = await triggerNativeEmergencyCall(
-        targetPhone, 
-        this.config.isTestMode, 
-        isServiceNumber
-      );
-
-      if (this.currentEvent) {
-        this.currentEvent.callStatus = this.config.isTestMode ? 'simulated' : (callResult.success ? 'success' : 'failed');
-        this.currentEvent.callMode = callResult.mode;
-        saveLocalEmergencyEvent(this.currentEvent);
+      let initiated = false;
+      let lastError: Error | null = null;
+      for (const target of callTargets) {
+        try {
+          const callResult = await triggerNativeEmergencyCall(target.phone, false, this.config.simPreference);
+          if (callResult.success) {
+            initiated = true;
+            if (this.currentEvent) {
+              this.currentEvent.contactName = target.name;
+              this.currentEvent.contactPhone = target.phone;
+              this.currentEvent.callStatus = 'success';
+              this.currentEvent.callMode = callResult.mode;
+              this.currentEvent.notes = `${this.currentEvent.notes || ''} | Call initiated for ${target.name}`;
+              saveLocalEmergencyEvent(this.currentEvent);
+            }
+            break;
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error('Android rejected the call request');
+        }
       }
+      if (!initiated) throw lastError || new Error('No configured emergency contact or service accepted the call request');
     } catch (callErr: any) {
       console.error('Emergency call execution error:', callErr);
+      this.currentState = 'FAILED';
+      if (this.currentEvent) this.currentEvent.state = 'FAILED';
       if (this.currentEvent) {
         this.currentEvent.callStatus = 'failed';
         this.currentEvent.notes = (this.currentEvent.notes || '') + ` | Call error: ${callErr?.message || 'Unknown'}`;
@@ -348,7 +410,7 @@ class EmergencyService {
     } catch (capErr) {
       // Fallback to browser navigator.geolocation
       if (navigator.geolocation) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           navigator.geolocation.getCurrentPosition(
             (geoPos) => {
               const loc: EmergencyLocation = {
@@ -361,112 +423,39 @@ class EmergencyService {
               this.lastKnownLocation = loc;
               resolve(loc);
             },
-            (err) => {
-              const fallback: EmergencyLocation = {
-                latitude: -1.9441, // Default Kigali baseline if GPS denied/unavailable in container
-                longitude: 30.0619,
-                accuracy: 100,
-                timestamp: Date.now(),
-                mapsUrl: 'https://www.google.com/maps?q=-1.9441,30.0619',
-                error: err.message,
-              };
-              resolve(fallback);
-            },
+            (err) => reject(new Error(`Location unavailable: ${err.message}`)),
             { enableHighAccuracy: true, timeout: 5000, maximumAge: 15000 }
           );
         });
       }
 
-      const fallback: EmergencyLocation = {
-        latitude: -1.9441,
-        longitude: 30.0619,
-        accuracy: 100,
-        timestamp: Date.now(),
-        mapsUrl: 'https://www.google.com/maps?q=-1.9441,30.0619',
-      };
-      return fallback;
+      throw new Error('Location services are unavailable or permission was denied');
     }
   }
 
-  /**
-   * Accelerometer & Gyroscope Crash & Fall Detection Engine
-   */
-  private initSensors() {
-    if (typeof window === 'undefined') return;
-
-    const handleMotion = (event: DeviceMotionEvent) => {
-      if (!this.config.crashDetectionEnabled && !this.config.fallDetectionEnabled) return;
-
-      const acc = event.accelerationIncludingGravity || event.acceleration;
-      if (!acc) return;
-
-      const x = acc.x || 0;
-      const y = acc.y || 0;
-      const z = acc.z || 0;
-      const mag = Math.sqrt(x * x + y * y + z * z);
-      const now = Date.now();
-
-      // Maintain a sliding window buffer of the last 2.5 seconds
-      this.motionSampleBuffer.push({ time: now, mag });
-      if (this.motionSampleBuffer.length > 50) {
-        this.motionSampleBuffer.shift();
-      }
-
-      // Sensitivity thresholds (m/s^2):
-      const crashThresholds = {
-        low: 35,
-        medium: 26,
-        high: 18,
-      };
-      const crashLimit = crashThresholds[this.config.crashSensitivity] || 26;
-
-      // 1. Crash Detection Logic (Sudden high G impact followed by stillness window)
-      if (this.config.crashDetectionEnabled && mag > crashLimit) {
-        if (!this.potentialCrashCandidate || now - this.potentialCrashCandidate.time > 3000) {
-          this.potentialCrashCandidate = { time: now, peakMag: mag };
-
-          // Confirm candidate after a 1.2s stillness evaluation window
-          setTimeout(() => {
-            if (this.potentialCrashCandidate && Math.abs(now - this.potentialCrashCandidate.time) < 2000) {
-              // Calculate post-impact variance
-              const recentSamples = this.motionSampleBuffer.filter((s) => s.time > now + 300);
-              const isStill = recentSamples.length === 0 || recentSamples.every((s) => Math.abs(s.mag - 9.8) < 8);
-              
-              if (isStill && this.currentState === 'NORMAL') {
-                this.triggerEmergency('crash', {
-                  notes: `Severe crash impact detected (${this.potentialCrashCandidate.peakMag.toFixed(1)} m/s²)`,
-                });
-              }
-              this.potentialCrashCandidate = null;
-            }
-          }, 1200);
-        }
-      }
-
-      // 2. Fall Detection Logic (Free-fall <3 m/s^2 drop followed by impact > 22 m/s^2)
-      if (this.config.fallDetectionEnabled) {
-        if (mag < 3.0) {
-          if (!this.freeFallStartTime) this.freeFallStartTime = now;
-        } else if (this.freeFallStartTime && now - this.freeFallStartTime > 150) {
-          if (mag > 22.0 && this.currentState === 'NORMAL') {
-            this.freeFallStartTime = null;
-            this.triggerEmergency('fall', {
-              notes: `Sudden free-fall and ground impact detected (${mag.toFixed(1)} m/s²)`,
-            });
-          } else if (now - this.freeFallStartTime > 800) {
-            this.freeFallStartTime = null;
-          }
-        }
-      }
-    };
-
+  private async consumeNativeAccidentSignal() {
+    if (this.currentState !== 'NORMAL') return;
     try {
-      window.addEventListener('devicemotion', handleMotion, { passive: true });
-      this.isMotionListening = true;
-    } catch (e) {
-      console.warn('Device motion listener initialization note:', e);
+      const pending = await SoberWatchEmergency.getPendingAccident();
+      if (!pending.detected) return;
+      const location = typeof pending.latitude === 'number' && typeof pending.longitude === 'number'
+        ? {
+            latitude: pending.latitude,
+            longitude: pending.longitude,
+            accuracy: Math.round(pending.accuracy || 0),
+            timestamp: pending.timestamp || Date.now(),
+            mapsUrl: `https://www.google.com/maps?q=${pending.latitude},${pending.longitude}`,
+          }
+        : undefined;
+      await this.triggerEmergency('crash', {
+        location,
+        notes: `${pending.reason || 'Multiple motion signals'} (confidence ${Math.round((pending.confidence || 0) * 100)}%)`,
+      });
+    } catch (error) {
+      console.warn('Native accident signal check unavailable:', error);
     }
   }
+
 
   /**
    * Synthesizes emergency audio siren beeps.
@@ -532,11 +521,6 @@ class EmergencyService {
     } catch {}
   }
 
-  private isPublicEmergencyServiceNumber(number: string): boolean {
-    if (!number) return false;
-    const clean = number.replace(/[^0-9]/g, '');
-    return ['112', '911', '999', '912', '111', '113', '114', '000'].includes(clean);
-  }
 }
 
 export const emergencyService = new EmergencyService();

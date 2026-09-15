@@ -1,55 +1,21 @@
-import { TelemetryReading, ReadingStatus } from '../types';
+import { TelemetryReading } from '../types';
+import { getFirebaseIdToken } from './firebase';
 
 export const DEFAULT_BACKEND_URL = 'https://soberwatch-backend.onrender.com';
 
 const BACKEND_URL_KEY = 'soberwatch_backend_url';
-const CACHED_READINGS_KEY = 'soberwatch_cached_readings';
 
-// Default initial readings to ensure flawless experience even if external backend is cold-starting
-const DEFAULT_INITIAL_READINGS: TelemetryReading[] = [
-  {
-    id: 'reading-initial-1',
-    alcoholBac: 0.000,
-    heartRateBpm: 72,
-    spo2Percent: 99,
-    tempCelsius: 36.6,
-    ecgStatus: 'Normal Sinus Rhythm',
-    sensorRaw: 120,
-    sensorResponse: 42,
-    status: 'SAFE',
-    deviceId: 'SW-001',
-    timestamp: Date.now() - 60000,
-    source: 'hardware'
-  },
-  {
-    id: 'reading-initial-2',
-    alcoholBac: 0.012,
-    heartRateBpm: 74,
-    spo2Percent: 98,
-    tempCelsius: 36.7,
-    ecgStatus: 'Normal Sinus Rhythm',
-    sensorRaw: 145,
-    sensorResponse: 55,
-    status: 'SAFE',
-    deviceId: 'SW-001',
-    timestamp: Date.now() - 3600000,
-    source: 'hardware'
-  },
-  {
-    id: 'reading-initial-3',
-    alcoholBac: 0.024,
-    heartRateBpm: 81,
-    spo2Percent: 98,
-    tempCelsius: 36.8,
-    ecgStatus: 'Elevated Rhythm',
-    sensorRaw: 210,
-    sensorResponse: 85,
-    status: 'CAUTION',
-    deviceId: 'SW-001',
-    timestamp: Date.now() - 7200000,
-    source: 'hardware'
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
   }
-];
+}
 
 export function getBackendUrl(): string {
   const stored = localStorage.getItem(BACKEND_URL_KEY) || DEFAULT_BACKEND_URL;
@@ -60,23 +26,59 @@ export function setBackendUrl(url: string) {
   localStorage.setItem(BACKEND_URL_KEY, url);
 }
 
-export function getCachedReadings(): TelemetryReading[] {
-  try {
-    const cached = localStorage.getItem(CACHED_READINGS_KEY);
-    if (cached) {
-      const parsed = JSON.parse(cached);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
-  } catch {}
-  return DEFAULT_INITIAL_READINGS;
+async function authenticatedHeaders(contentType = false): Promise<Record<string, string>> {
+  const token = await getFirebaseIdToken();
+  return {
+    Accept: 'application/json',
+    ...(contentType ? { 'Content-Type': 'application/json' } : {}),
+    Authorization: `Bearer ${token}`,
+  };
 }
 
-export function saveCachedReadings(readings: TelemetryReading[]) {
-  try {
-    localStorage.setItem(CACHED_READINGS_KEY, JSON.stringify(readings.slice(0, 100)));
-  } catch {}
+async function parseResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ApiError(
+      typeof body?.message === 'string' ? body.message : `Backend request failed (${response.status})`,
+      response.status,
+      typeof body?.code === 'string' ? body.code : undefined,
+    );
+  }
+  return body as T;
+}
+
+function normalizeReading(raw: Record<string, unknown>): TelemetryReading {
+  const requiredNumbers = ['alcoholBac', 'heartRateBpm', 'spo2Percent', 'tempCelsius', 'timestamp', 'deviceId'];
+  for (const field of requiredNumbers) {
+    if (raw[field] === undefined || raw[field] === null || raw[field] === '') {
+      throw new ApiError(`Backend reading is missing ${field}`, 502, 'INVALID_READING');
+    }
+  }
+
+  const status = raw.status;
+  if (status !== 'SAFE' && status !== 'CAUTION' && status !== 'DANGER') {
+    throw new ApiError('Backend reading has an invalid status', 502, 'INVALID_READING');
+  }
+
+  const timestamp = typeof raw.timestamp === 'string' ? Date.parse(raw.timestamp) : Number(raw.timestamp);
+  if (!Number.isFinite(timestamp)) {
+    throw new ApiError('Backend reading has an invalid timestamp', 502, 'INVALID_READING');
+  }
+
+  return {
+    id: typeof raw.id === 'string' ? raw.id : undefined,
+    alcoholBac: Number(raw.alcoholBac),
+    heartRateBpm: Number(raw.heartRateBpm),
+    spo2Percent: Number(raw.spo2Percent),
+    tempCelsius: Number(raw.tempCelsius),
+    ecgStatus: typeof raw.ecgStatus === 'string' ? raw.ecgStatus : undefined,
+    sensorRaw: raw.sensorRaw === undefined ? 0 : Number(raw.sensorRaw),
+    sensorResponse: raw.sensorResponse === undefined ? undefined : Number(raw.sensorResponse),
+    status,
+    deviceId: String(raw.deviceId),
+    timestamp,
+    source: typeof raw.source === 'string' ? raw.source : undefined,
+  };
 }
 
 // Check Backend Health (GET / returns status)
@@ -139,112 +141,52 @@ export async function apiLogin(email: string, password: string): Promise<{ succe
   }
 }
 
-// Fetch Real Readings from GET /api/readings?uid=test-user with fallback to cached readings
-export async function apiFetchReadings(uid: string = 'test-user'): Promise<TelemetryReading[]> {
+// Fetch authenticated readings from GET /api/readings?uid=UID&limit=100.
+export async function apiFetchReadings(uid: string): Promise<TelemetryReading[]> {
+  if (!uid.trim()) throw new ApiError('A Firebase UID is required to fetch readings', 401, 'AUTH_REQUIRED');
   const base = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-    const res = await fetch(`${base}/api/readings?uid=${encodeURIComponent(uid)}`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      signal: controller.signal
+    const response = await fetch(`${base}/api/readings?uid=${encodeURIComponent(uid)}&limit=100`, {
+      headers: await authenticatedHeaders(),
+      signal: controller.signal,
     });
+    const data = await parseResponse<{ readings?: unknown[] }>(response);
+    if (!Array.isArray(data.readings)) throw new ApiError('Backend returned no readings array', 502, 'INVALID_RESPONSE');
+    return data.readings.map((reading) => normalizeReading(reading as Record<string, unknown>));
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('Telemetry request timed out', 408, 'TIMEOUT');
+    }
+    throw error;
+  } finally {
     clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      const rawList = Array.isArray(data) 
-        ? data 
-        : (Array.isArray(data.readings) ? data.readings : (Array.isArray(data.data) ? data.data : (Array.isArray(data.results) ? data.results : [])));
-
-      if (rawList && rawList.length > 0) {
-        const formatted: TelemetryReading[] = rawList.map((r: any) => {
-          const bac = Number(r.alcoholBac ?? r.bac ?? 0);
-          let status: ReadingStatus = r.status;
-          if (!status) {
-            if (bac >= 0.08) status = 'DANGER';
-            else if (bac >= 0.02) status = 'CAUTION';
-            else status = 'SAFE';
-          }
-          return {
-            id: r.id || r._id || `reading-${r.timestamp || Date.now()}`,
-            alcoholBac: Number(bac.toFixed(3)),
-            heartRateBpm: Number(r.heartRateBpm ?? r.heartRate ?? 0),
-            spo2Percent: Number(r.spo2Percent ?? r.spo2 ?? 0),
-            tempCelsius: Number(r.tempCelsius ?? r.temp ?? 0),
-            ecgStatus: r.ecgStatus || 'Normal Sinus Rhythm',
-            sensorRaw: Number(r.sensorRaw ?? r.raw ?? 0),
-            sensorResponse: Number(r.sensorResponse ?? 0),
-            status,
-            deviceId: r.deviceId || 'SW-001',
-            timestamp: r.timestamp ? (typeof r.timestamp === 'string' ? new Date(r.timestamp).getTime() : Number(r.timestamp)) : Date.now(),
-            source: r.source || 'hardware'
-          };
-        });
-
-        saveCachedReadings(formatted);
-        return formatted;
-      }
-    }
-  } catch (err: any) {
-    // Graceful fallback to cached readings without throwing uncaught errors
-    if (err?.name !== 'AbortError') {
-      console.warn('Backend readings sync deferred (using local cache):', err?.message || 'offline');
-    }
   }
-  
-  return getCachedReadings();
 }
 
-// Fetch Last Health/Reading from GET /api/health?uid=test-user
-export async function apiFetchHealth(uid: string = 'test-user'): Promise<TelemetryReading | null> {
+// Fetch the authenticated latest reading from GET /api/health?uid=UID.
+export async function apiFetchHealth(uid: string): Promise<TelemetryReading> {
+  if (!uid.trim()) throw new ApiError('A Firebase UID is required to fetch health data', 401, 'AUTH_REQUIRED');
   const base = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${base}/api/health?uid=${encodeURIComponent(uid)}`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      signal: controller.signal
+    const response = await fetch(`${base}/api/health?uid=${encodeURIComponent(uid)}`, {
+      headers: await authenticatedHeaders(),
+      signal: controller.signal,
     });
+    const data = await parseResponse<{ data?: Record<string, unknown> }>(response);
+    if (!data.data) throw new ApiError('Backend returned no latest reading', 404, 'NO_DATA');
+    return normalizeReading(data.data);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('Health request timed out', 408, 'TIMEOUT');
+    }
+    throw error;
+  } finally {
     clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      const r = data.data || data.reading || data.latestReading || (data.alcoholBac !== undefined ? data : null);
-      if (r) {
-        const bac = Number(r.alcoholBac ?? r.bac ?? 0);
-        let status: ReadingStatus = r.status;
-        if (!status) {
-          if (bac >= 0.08) status = 'DANGER';
-          else if (bac >= 0.02) status = 'CAUTION';
-          else status = 'SAFE';
-        }
-        return {
-          id: r.id || r._id || 'health-last',
-          alcoholBac: Number(bac.toFixed(3)),
-          heartRateBpm: Number(r.heartRateBpm ?? r.heartRate ?? 0),
-          spo2Percent: Number(r.spo2Percent ?? r.spo2 ?? 0),
-          tempCelsius: Number(r.tempCelsius ?? r.temp ?? 0),
-          ecgStatus: r.ecgStatus || 'Normal Sinus Rhythm',
-          sensorRaw: Number(r.sensorRaw ?? 0),
-          sensorResponse: Number(r.sensorResponse ?? 0),
-          status,
-          deviceId: r.deviceId || 'SW-001',
-          timestamp: r.timestamp ? (typeof r.timestamp === 'string' ? new Date(r.timestamp).getTime() : Number(r.timestamp)) : Date.now(),
-          source: r.source || 'hardware'
-        };
-      }
-    }
-  } catch (err: any) {
-    if (err?.name !== 'AbortError') {
-      console.warn('Backend health sync deferred:', err?.message || 'offline');
-    }
   }
-  
-  const cached = getCachedReadings();
-  return cached.length > 0 ? cached[0] : null;
 }
 
 // Upload Telemetry to POST /uploadTelemetry
@@ -253,65 +195,31 @@ export async function apiUploadTelemetry(
   apiKey?: string
 ): Promise<{ success: boolean; message: string }> {
   const base = getBackendUrl();
-  const newReading: TelemetryReading = {
-    id: data.id || `reading-${Date.now()}`,
-    alcoholBac: data.alcoholBac ?? 0,
-    heartRateBpm: data.heartRateBpm ?? 0,
-    spo2Percent: data.spo2Percent ?? 0,
-    tempCelsius: data.tempCelsius ?? 0,
-    ecgStatus: data.ecgStatus || 'Normal Sinus Rhythm',
-    sensorRaw: data.sensorRaw ?? 0,
-    sensorResponse: data.sensorResponse ?? 0,
-    status: data.status || (data.alcoholBac && data.alcoholBac >= 0.08 ? 'DANGER' : (data.alcoholBac && data.alcoholBac >= 0.02 ? 'CAUTION' : 'SAFE')),
-    deviceId: data.deviceId || 'SW-001',
-    timestamp: data.timestamp || Date.now(),
-    source: 'hardware'
-  };
-
-  // Prepend to local cache immediately
-  const existing = getCachedReadings();
-  saveCachedReadings([newReading, ...existing]);
-
-  try {
-    const payload = {
-      uid: data.uid,
-      alcoholBac: newReading.alcoholBac,
-      heartRateBpm: newReading.heartRateBpm,
-      spo2Percent: newReading.spo2Percent,
-      tempCelsius: newReading.tempCelsius,
-      ecgStatus: newReading.ecgStatus,
-      sensorRaw: newReading.sensorRaw,
-      sensorResponse: newReading.sensorResponse,
-      status: newReading.status,
-      deviceId: newReading.deviceId,
-      timestamp: newReading.timestamp,
-      source: 'hardware'
-    };
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    };
-    if (apiKey) {
-      headers['x-api-key'] = apiKey;
+  const requiredFields: (keyof TelemetryReading)[] = [
+    'alcoholBac', 'heartRateBpm', 'spo2Percent', 'tempCelsius', 'status', 'deviceId', 'timestamp',
+  ];
+  for (const field of requiredFields) {
+    if (data[field] === undefined || data[field] === null) {
+      throw new ApiError(`Telemetry is missing ${field}`, 400, 'INVALID_TELEMETRY');
     }
+  }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-    const res = await fetch(`${base}/uploadTelemetry`, {
+  const headers = apiKey
+    ? { Accept: 'application/json', 'Content-Type': 'application/json', 'x-api-key': apiKey }
+    : await authenticatedHeaders(true);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(`${base}/uploadTelemetry`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal
+      body: JSON.stringify({ ...data, source: data.source || 'hardware' }),
+      signal: controller.signal,
     });
+    const result = await parseResponse<{ message?: string }>(response);
+    return { success: true, message: result.message || 'Telemetry uploaded' };
+  } finally {
     clearTimeout(timeoutId);
-
-    const resData = await res.json();
-    if (res.ok && (resData.status === 'success' || resData.success)) {
-      return { success: true, message: resData.message || 'Telemetry uploaded' };
-    }
-    return { success: true, message: 'Saved locally' };
-  } catch (err: any) {
-    return { success: true, message: 'Saved locally to device' };
   }
 }
 
@@ -356,41 +264,32 @@ export async function apiSendEmergencyEvent(payload: {
   recognizedText?: string;
 }): Promise<{ success: boolean; message: string }> {
   const base = getBackendUrl();
+  if (!payload.uid.trim()) throw new ApiError('A Firebase UID is required to log an emergency', 401, 'AUTH_REQUIRED');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
     const res = await fetch(`${base}/api/emergency`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
+      headers: await authenticatedHeaders(true),
       body: JSON.stringify({
-        uid: payload.uid || 'test-user',
+        uid: payload.uid,
         eventId: payload.eventId || `emg-${Date.now()}`,
         type: payload.type,
         severity: payload.severity || 'high',
-        latitude: payload.latitude ?? 0,
-        longitude: payload.longitude ?? 0,
-        accuracy: payload.accuracy ?? 0,
+        latitude: payload.latitude,
+        longitude: payload.longitude,
+        accuracy: payload.accuracy,
         timestamp: payload.timestamp,
-        contact: payload.contact || '',
-        mapsUrl: payload.mapsUrl || '',
-        notes: payload.notes || '',
-        recognizedText: payload.recognizedText || '',
+        contact: payload.contact,
+        mapsUrl: payload.mapsUrl,
+        notes: payload.notes,
+        recognizedText: payload.recognizedText,
       }),
-      signal: controller.signal
+      signal: controller.signal,
     });
+    const data = await parseResponse<{ message?: string }>(res);
+    return { success: true, message: data.message || 'Emergency event logged to server' };
+  } finally {
     clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json().catch(() => ({ status: 'success' }));
-      return { success: true, message: data.message || 'Emergency event logged to server' };
-    }
-    return { success: false, message: `Server status: ${res.status}` };
-  } catch (err: any) {
-    // Return gracefully so emergency phone call is never blocked by network/backend
-    return { success: false, message: err?.message || 'Logged locally (offline)' };
   }
 }
-

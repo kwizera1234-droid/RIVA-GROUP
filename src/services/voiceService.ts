@@ -650,16 +650,10 @@ class VoiceService {
       return match;
     }
 
-    // Action 2: Voice Emergency SOS Request
+    // Automatic emergency detection is the only emergency trigger. Voice can cancel it, but cannot start a second workflow.
     if (match.intent === 'EMERGENCY_REQUEST') {
-      this.logDiagnostic('[VOICE] Tool Action: EMERGENCY_REQUEST triggered');
-      await this.speak(match.speechResponse, match.detectedLanguage);
-      
-      await emergencyService.triggerEmergency('voice_emergency', {
-        notes: `Voice Emergency Command: "${rawText}"`,
-        customCountdown: this.config.countdownSeconds || 10,
-      });
-
+      this.logDiagnostic('[VOICE] Emergency request ignored: automatic detection owns emergency activation');
+      await this.speak('Automatic emergency detection is active. I can cancel an active emergency countdown, but I will not start a separate emergency workflow.', match.detectedLanguage);
       this.finishProcessing();
       return match;
     }
@@ -674,11 +668,8 @@ class VoiceService {
       this.logDiagnostic(`[VOICE] Tool Action: CALL_CONTACT triggered for ${targetName}`);
       await this.speak(match.speechResponse, match.detectedLanguage);
 
-      await emergencyService.triggerEmergency('voice_emergency', {
-        notes: `Voice Call Request to ${targetName}: "${rawText}"`,
-        customCountdown: 5,
-      });
-
+      this.logDiagnostic(`[VOICE] Direct emergency call request not started from voice: ${targetName}`);
+      await this.speak('I cannot start a separate emergency workflow from voice. Configure active contacts in Emergency and Safety settings.', match.detectedLanguage);
       this.finishProcessing();
       return match;
     }

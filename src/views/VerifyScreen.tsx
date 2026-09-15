@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { KeyRound } from 'lucide-react';
 import { UserProfile, Language } from '../types';
 import { translations } from '../i18n/translations';
+import { firebaseErrorMessage, refreshFirebaseUser, resendVerificationEmail, userToProfile } from '../services/firebase';
 
 interface VerifyProps {
   email: string;
@@ -35,19 +36,31 @@ export const VerifyScreen: React.FC<VerifyProps> = ({
     }
   };
 
-  const handleVerify = () => {
+  const handleVerify = async () => {
     setIsVerifying(true);
-    setTimeout(() => {
-      setIsVerifying(false);
+    try {
+      const user = await refreshFirebaseUser();
+      if (!user) throw new Error('Authentication session expired. Please sign in again.');
+      if (!user.emailVerified) throw new Error('Email verification is not complete. Open the verification email and try again.');
       const savedPhoto = localStorage.getItem('soberwatch_temp_avatar') || undefined;
       onVerified({
-        uid: 'user-' + Math.random().toString(36).substring(2, 7),
-        email,
-        displayName: email.split('@')[0],
+        ...userToProfile(user),
         photoUrl: savedPhoto,
-        isGuest: false
       });
-    }, 600);
+    } catch (error) {
+      setIsVerifying(false);
+      const message = firebaseErrorMessage(error);
+      window.alert(message);
+    }
+  };
+
+  const handleResend = async () => {
+    try {
+      await resendVerificationEmail();
+      window.alert('Verification email sent.');
+    } catch (error) {
+      window.alert(firebaseErrorMessage(error));
+    }
   };
 
   return (
@@ -93,6 +106,10 @@ export const VerifyScreen: React.FC<VerifyProps> = ({
             className="w-full py-3 rounded-[16px] bg-[#D4AF37] hover:bg-[#c49f2f] text-black font-semibold text-xs tracking-wider uppercase transition cursor-pointer active:scale-98"
           >
             {isVerifying ? t.verifying : t.verifyBtn}
+          </button>
+
+          <button type="button" onClick={handleResend} className="text-xs font-mono text-[#D4AF37] hover:underline">
+            Resend verification email
           </button>
 
           <button

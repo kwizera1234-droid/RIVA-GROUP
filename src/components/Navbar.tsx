@@ -25,6 +25,12 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [langMenuOpen, setLangMenuOpen] = useState(false);
   const t = translations[language] || translations.en;
 
+  const topMenuItems: { label: string; screen: ActiveScreen }[] = [
+    { label: 'Home', screen: 'dashboard' },
+    { label: 'Health', screen: 'health' },
+    { label: 'Reports', screen: 'reports' },
+  ];
+
   const languagesList: { code: Language; label: string; name: string }[] = [
     { code: 'rw', label: 'RW', name: 'Kinyarwanda' },
     { code: 'en', label: 'EN', name: 'English' },
@@ -46,6 +52,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               {t.subtitle}
             </span>
           </div>
+        </div>
+
+        <div className="hidden md:flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+          {topMenuItems.map((item) => (
+            <button
+              key={item.screen}
+              type="button"
+              onClick={() => onNavigate?.(item.screen)}
+              className="px-3.5 py-1.5 rounded-full text-[11px] font-mono uppercase tracking-[0.18em] text-white/70 transition hover:text-[#D4AF37] hover:bg-white/[0.04] cursor-pointer"
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
 
         {/* Top Controls: Bell Notification, Language & User Avatar */}

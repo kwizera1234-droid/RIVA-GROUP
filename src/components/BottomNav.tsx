@@ -21,6 +21,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   const tabs: { id: ActiveScreen; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'dashboard', label: t.dashboardTab, icon: Activity },
+    { id: 'health', label: 'Health', icon: Activity },
+    { id: 'reports', label: 'Reports', icon: History },
     { id: 'history', label: t.historyTab, icon: History },
     { id: 'alerts', label: t.alertsTab, icon: Bell },
     { id: 'settings', label: t.settingsTab, icon: Settings },
@@ -33,7 +35,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       className="fixed bottom-0 left-0 right-0 z-50 w-full bg-[#08080a]/94 backdrop-blur-2xl border-t border-white/10 shadow-[0_-10px_35px_rgba(0,0,0,0.85)]"
       style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 8px)' }}
     >
-      <div className="max-w-md md:max-w-lg mx-auto px-4 pt-1 flex items-center justify-around">
+      <div className="max-w-lg mx-auto px-2 pt-1 flex items-center justify-around gap-1 overflow-x-auto">
         {tabs.map((tab) => {
           const isActive = currentScreen === tab.id;
           const Icon = tab.icon;

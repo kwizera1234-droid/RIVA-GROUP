@@ -53,7 +53,7 @@ export const DataPrivacyView: React.FC<DataPrivacyProps> = ({ readings, language
           r.status,
           r.heartRateBpm,
           r.sensorRaw,
-          `"${r.deviceId || 'SW-001'}"`
+          `"${r.deviceId}"`
         ].join(',');
       });
 

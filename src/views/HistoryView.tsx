@@ -117,7 +117,7 @@ export const HistoryView: React.FC<HistoryProps> = ({
                   <div className="text-[11px] font-mono text-white/40 flex flex-wrap items-center gap-3">
                     <span className="flex items-center gap-1">
                       <Cpu className="w-3 h-3 text-[#D4AF37]" />
-                      {reading.deviceId || 'SW-001'}
+                      {reading.deviceId}
                     </span>
                     {reading.sensorRaw > 0 && <span>{t.sensorRaw}: {reading.sensorRaw}</span>}
                     {reading.heartRateBpm > 0 && <span>{t.heartRate}: {reading.heartRateBpm} BPM</span>}

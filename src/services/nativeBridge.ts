@@ -1,6 +1,32 @@
 import { registerPlugin } from '@capacitor/core';
 
 export interface SoberWatchEmergencyPluginInterface {
+  startMonitoring(options?: {
+    sensitivity?: 'low' | 'medium' | 'high';
+    locationSharingEnabled?: boolean;
+  }): Promise<{ success: boolean; mode: string; message: string }>;
+
+  stopMonitoring(): Promise<{ success: boolean; message: string }>;
+
+  getPendingAccident(): Promise<{
+    detected: boolean;
+    timestamp?: number;
+    latitude?: number;
+    longitude?: number;
+    accuracy?: number;
+    confidence?: number;
+    reason?: string;
+  }>;
+
+  checkSensorSupport(): Promise<{
+    accelerometer: boolean;
+    gyroscope: boolean;
+    location: boolean;
+    camera: boolean;
+    microphone: boolean;
+    isNativeAndroid: boolean;
+  }>;
+
   checkCallSupport(): Promise<{
     hasTelephony: boolean;
     hasMicrophone?: boolean;
@@ -14,6 +40,7 @@ export interface SoberWatchEmergencyPluginInterface {
   makeEmergencyCall(options: {
     phoneNumber: string;
     useDialer?: boolean;
+    simPreference?: 'SIM_1' | 'SIM_2' | 'ASK' | 'AUTOMATIC';
   }): Promise<{
     success: boolean;
     mode: 'ACTION_CALL' | 'ACTION_DIAL';
@@ -31,6 +58,20 @@ export interface SoberWatchEmergencyPluginInterface {
     message?: string;
   }>;
 
+  /** Opens the user-approved system camera; silent/background capture is not supported by Android. */
+  captureEvidence(): Promise<{
+    success: boolean;
+    uri?: string;
+    message?: string;
+  }>;
+
+  shareIncident(options: {
+    phoneNumber?: string;
+    latitude?: number;
+    longitude?: number;
+    timestamp?: number;
+  }): Promise<{ success: boolean; message: string }>;
+
   requestPermissions?(permissions?: { permissions: string[] }): Promise<{
     callPhone: 'granted' | 'denied' | 'prompt';
     location: 'granted' | 'denied' | 'prompt';
@@ -47,6 +88,25 @@ export interface SoberWatchEmergencyPluginInterface {
 // Register the custom Capacitor native plugin with fallback
 export const SoberWatchEmergency = registerPlugin<SoberWatchEmergencyPluginInterface>('SoberWatchEmergency', {
   web: () => ({
+    async startMonitoring() {
+      return { success: false, mode: 'WEB', message: 'Background native monitoring is unavailable in a browser' };
+    },
+    async stopMonitoring() {
+      return { success: true, message: 'Browser monitoring stopped' };
+    },
+    async getPendingAccident() {
+      return { detected: false };
+    },
+    async checkSensorSupport() {
+      return {
+        accelerometer: 'DeviceMotionEvent' in window,
+        gyroscope: 'DeviceMotionEvent' in window,
+        location: 'geolocation' in navigator,
+        camera: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+        microphone: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+        isNativeAndroid: false,
+      };
+    },
     async checkCallSupport() {
       const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
       return {
@@ -60,46 +120,16 @@ export const SoberWatchEmergency = registerPlugin<SoberWatchEmergencyPluginInter
       };
     },
     async makeEmergencyCall(options) {
-      // In browser / web environment fallback, launch standard tel protocol
-      const cleanNumber = (options.phoneNumber || '').trim();
-      if (!cleanNumber) {
-        throw new Error('Phone number is required');
-      }
-      try {
-        const link = document.createElement('a');
-        link.href = `tel:${encodeURIComponent(cleanNumber)}`;
-        link.setAttribute('target', '_top');
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      } catch {
-        window.location.href = `tel:${encodeURIComponent(cleanNumber)}`;
-      }
-      return {
-        success: true,
-        mode: 'ACTION_DIAL',
-        phoneNumber: cleanNumber,
-        message: 'Dispatched via browser tel handler',
-      };
+      throw new Error('Automatic calling is available only on the Android device build');
     },
     async openDialer(options) {
-      const cleanNumber = (options.phoneNumber || '').trim();
-      try {
-        const link = document.createElement('a');
-        link.href = `tel:${encodeURIComponent(cleanNumber)}`;
-        link.setAttribute('target', '_top');
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      } catch {
-        window.location.href = `tel:${encodeURIComponent(cleanNumber)}`;
-      }
-      return {
-        success: true,
-        mode: 'ACTION_DIAL',
-        phoneNumber: cleanNumber,
-        message: 'Opened browser dialer',
-      };
+      throw new Error('Dialer access is available only on the Android device build');
+    },
+    async captureEvidence() {
+      throw new Error('Evidence capture is available only on Android and requires user camera confirmation');
+    },
+    async shareIncident() {
+      throw new Error('Incident sharing is available only on the Android device build');
     },
   }),
 });
@@ -109,11 +139,11 @@ export const SoberWatchEmergency = registerPlugin<SoberWatchEmergencyPluginInter
  */
 export async function triggerNativeEmergencyCall(
   phoneNumber: string,
-  isTestingMode = false,
-  forceDialer = false
+  forceDialer = false,
+  simPreference: 'SIM_1' | 'SIM_2' | 'ASK' | 'AUTOMATIC' = 'AUTOMATIC'
 ): Promise<{
   success: boolean;
-  mode: 'ACTION_CALL' | 'ACTION_DIAL' | 'TEST_SIMULATED' | 'WEB_TEL';
+  mode: 'ACTION_CALL' | 'ACTION_DIAL';
   message: string;
 }> {
   const cleanNumber = phoneNumber.trim();
@@ -121,19 +151,11 @@ export async function triggerNativeEmergencyCall(
     throw new Error('No valid emergency phone number configured');
   }
 
-  if (isTestingMode) {
-    console.info(`[TEST MODE] Emergency call simulated to ${cleanNumber}`);
-    return {
-      success: true,
-      mode: 'TEST_SIMULATED',
-      message: `[TEST MODE] Simulated emergency call to ${cleanNumber}`,
-    };
-  }
-
   try {
     const result = await SoberWatchEmergency.makeEmergencyCall({
       phoneNumber: cleanNumber,
       useDialer: forceDialer,
+      simPreference,
     });
     return {
       success: result.success,
@@ -141,16 +163,25 @@ export async function triggerNativeEmergencyCall(
       message: result.message || `Emergency call placed via ${result.mode}`,
     };
   } catch (err: any) {
-    console.warn('Native calling failed, attempting browser tel fallback:', err);
-    try {
-      window.location.href = `tel:${encodeURIComponent(cleanNumber)}`;
-      return {
-        success: true,
-        mode: 'WEB_TEL',
-        message: 'Fallback to browser tel link',
-      };
-    } catch (fallbackErr: any) {
-      throw new Error(`Failed to place emergency call: ${err?.message || fallbackErr?.message || 'Unknown error'}`);
+    throw new Error(`Emergency call was not initiated: ${err?.message || 'Android rejected the request'}`);
+  }
+}
+
+export async function syncNativeMonitoring(config: {
+  crashDetectionEnabled: boolean;
+  crashSensitivity: 'low' | 'medium' | 'high';
+  locationSharingEnabled: boolean;
+}) {
+  try {
+    if (config.crashDetectionEnabled) {
+      return await SoberWatchEmergency.startMonitoring({
+        sensitivity: config.crashSensitivity,
+        locationSharingEnabled: config.locationSharingEnabled,
+      });
     }
+    return await SoberWatchEmergency.stopMonitoring();
+  } catch (error) {
+    console.warn('Native accident monitoring is unavailable:', error);
+    return { success: false, mode: 'UNAVAILABLE', message: 'Native monitoring unavailable' };
   }
 }

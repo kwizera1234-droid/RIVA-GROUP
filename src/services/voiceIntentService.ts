@@ -456,9 +456,10 @@ export function getCallContactSpeechResponse(contactName: string, lang: Language
 }
 
 export function getHealthSpeechResponse(reading: TelemetryReading | null, lang: Language): string {
-  const hr = reading?.heartRateBpm ?? 72;
-  const spo2 = reading?.spo2Percent ?? 98;
-  const status = reading?.status || 'SAFE';
+  if (!reading) return noTelemetryResponse(lang);
+  const hr = reading.heartRateBpm;
+  const spo2 = reading.spo2Percent;
+  const status = reading.status;
 
   switch (lang) {
     case 'rw':
@@ -478,7 +479,8 @@ export function getHealthSpeechResponse(reading: TelemetryReading | null, lang: 
 }
 
 export function getAlcoholSpeechResponse(reading: TelemetryReading | null, lang: Language): string {
-  const bac = reading?.alcoholBac ?? 0.0;
+  if (!reading) return noTelemetryResponse(lang);
+  const bac = reading.alcoholBac;
 
   switch (lang) {
     case 'rw':
@@ -500,8 +502,9 @@ export function getAlcoholSpeechResponse(reading: TelemetryReading | null, lang:
 }
 
 export function getDrivingSpeechResponse(reading: TelemetryReading | null, lang: Language): string {
-  const bac = reading?.alcoholBac ?? 0.0;
-  const hr = reading?.heartRateBpm ?? 72;
+  if (!reading) return noTelemetryResponse(lang);
+  const bac = reading.alcoholBac;
+  const hr = reading.heartRateBpm;
   const isSafe = bac < 0.04 && hr < 115;
 
   switch (lang) {
@@ -542,8 +545,9 @@ export function getLocationSpeechResponse(lang: Language): string {
 }
 
 export function getDailyReportSpeechResponse(reading: TelemetryReading | null, lang: Language): string {
-  const hr = reading?.heartRateBpm ?? 72;
-  const bac = reading?.alcoholBac ?? 0.0;
+  if (!reading) return noTelemetryResponse(lang);
+  const hr = reading.heartRateBpm;
+  const bac = reading.alcoholBac;
 
   switch (lang) {
     case 'rw':
@@ -555,6 +559,16 @@ export function getDailyReportSpeechResponse(reading: TelemetryReading | null, l
     case 'en':
     default:
       return `Daily report summary: BAC at ${bac.toFixed(2)}, heart rate at ${hr} bpm. Overall safety score is 100%.`;
+  }
+
+  function noTelemetryResponse(lang: Language): string {
+    switch (lang) {
+      case 'rw': return 'Nta bipimo byemejwe na server biboneka kuri ubu.';
+      case 'fr': return 'Aucune mesure verifiee du serveur n est disponible pour le moment.';
+      case 'sw': return 'Hakuna vipimo vilivyothibitishwa kutoka kwa seva kwa sasa.';
+      case 'en':
+      default: return 'No verified telemetry is currently available from the server.';
+    }
   }
 }
 

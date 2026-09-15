@@ -6,20 +6,22 @@ import { BottomNav } from './components/BottomNav';
 import { DangerNotificationBanner } from './components/DangerNotificationBanner';
 import { AppDrawerMenu } from './components/AppDrawerMenu';
 import { EmergencyModal } from './components/EmergencyModal';
-import { AppFooter } from './components/AppFooter';
 
 import { SplashScreen } from './views/SplashScreen';
 import { AuthScreen } from './views/AuthScreen';
 import { VerifyScreen } from './views/VerifyScreen';
 import { DashboardView } from './views/DashboardView';
+import { HealthView } from './views/HealthView';
+import { ReportsView } from './views/ReportsView';
 import { HistoryView } from './views/HistoryView';
 import { AlertsView } from './views/AlertsView';
 import { SettingsView } from './views/SettingsView';
 
 import { ActiveScreen, TelemetryReading, UserProfile, Language, SettingsSubPage } from './types';
-import { apiFetchReadings, apiFetchHealth } from './services/api';
+import { apiFetchReadings } from './services/api';
 import { emergencyService } from './services/emergencyService';
 import { VoiceAssistantView } from './views/VoiceAssistantView';
+import { waitForAuthRestore, userToProfile } from './services/firebase';
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('splash');
@@ -31,13 +33,7 @@ export default function App() {
     return 'en';
   });
 
-  const [user, setUser] = useState<UserProfile | null>(() => {
-    const saved = localStorage.getItem('soberwatch_user');
-    if (saved) {
-      try { return JSON.parse(saved); } catch {}
-    }
-    return null;
-  });
+  const [user, setUser] = useState<UserProfile | null>(null);
   const [verifyingEmail, setVerifyingEmail] = useState<string>('');
 
   const [readings, setReadings] = useState<TelemetryReading[]>([]);
@@ -49,6 +45,24 @@ export default function App() {
 
   const prevLatestTimestampRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    let active = true;
+    waitForAuthRestore()
+      .then((firebaseUser) => {
+        if (active && firebaseUser) {
+          const restoredUser = userToProfile(firebaseUser);
+          setUser(restoredUser);
+          localStorage.setItem('soberwatch_user', JSON.stringify(restoredUser));
+        }
+      })
+      .catch((error) => {
+        console.error('Firebase auth restore failed:', error);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const handleLanguageChange = (lang: Language) => {
     setLanguage(lang);
     localStorage.setItem('soberwatch_lang', lang);
@@ -56,38 +70,37 @@ export default function App() {
 
   // Load real telemetry data strictly from backend
   const loadTelemetry = useCallback(async (isInitial = false) => {
+    if (!user?.uid) {
+      setReadings([]);
+      setCurrentReading(null);
+      setFetchError(null);
+      if (isInitial) setIsLoading(false);
+      return;
+    }
     if (isInitial) setIsLoading(true);
-    const uid = user?.uid || 'test-user';
     
     try {
       setFetchError(null);
-      const fetched = await apiFetchReadings(uid);
-      if (fetched && fetched.length > 0) {
-        setReadings(fetched);
-        const latest = fetched[0];
-        
-        // Check if fresh reading arrived to trigger auto-analysis animation
-        if (latest && latest.timestamp !== prevLatestTimestampRef.current) {
-          prevLatestTimestampRef.current = latest.timestamp;
-          setIsAnalyzing(true);
-          setTimeout(() => setIsAnalyzing(false), 2000);
-        }
+      const fetched = await apiFetchReadings(user.uid);
+      setReadings(fetched);
+      const latest = fetched[0] ?? null;
 
-        setCurrentReading(latest);
-      } else {
-        const lastHealth = await apiFetchHealth(uid);
-        if (lastHealth) {
-          setReadings([lastHealth]);
-          setCurrentReading(lastHealth);
-        }
+      if (latest && latest.timestamp !== prevLatestTimestampRef.current) {
+        prevLatestTimestampRef.current = latest.timestamp;
+        setIsAnalyzing(true);
+        setTimeout(() => setIsAnalyzing(false), 2000);
       }
+
+      setCurrentReading(latest);
     } catch (e) {
       console.error('Error fetching telemetry:', e);
-      setFetchError('Could not reach backend');
+      setFetchError(e instanceof Error ? e.message : 'Unable to fetch telemetry from backend');
+      setReadings([]);
+      setCurrentReading(null);
     } finally {
       if (isInitial) setIsLoading(false);
     }
-  }, [user]);
+  }, [user?.uid]);
 
   // Polling every 5 seconds for real-time updates
   useEffect(() => {
@@ -118,11 +131,11 @@ export default function App() {
   };
 
   const isDangerActive = currentReading?.status === 'DANGER' && !dangerDismissed;
-  const deviceId = currentReading?.deviceId || 'SW-001';
+  const deviceId = currentReading?.deviceId || '';
 
   return (
     <AppBackground>
-      {/* Real-time Emergency SOS & Automated Calling Full-screen / Float Modal */}
+      {/* Automatic sensor emergency workflow */}
       <EmergencyModal language={language} uid={user?.uid} />
 
       <AnimatePresence mode="wait">
@@ -230,6 +243,43 @@ export default function App() {
                   </motion.div>
                 )}
 
+                {activeScreen === 'health' && (
+                  <motion.div
+                    key="health"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    <HealthView
+                      reading={currentReading}
+                      readings={readings}
+                      language={language}
+                      isLoading={isLoading}
+                      error={fetchError}
+                      onRetry={() => loadTelemetry(true)}
+                    />
+                  </motion.div>
+                )}
+
+                {activeScreen === 'reports' && (
+                  <motion.div
+                    key="reports"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.25 }}
+                  >
+                    <ReportsView
+                      readings={readings}
+                      healthReading={currentReading}
+                      language={language}
+                      isLoading={isLoading}
+                      error={fetchError}
+                    />
+                  </motion.div>
+                )}
+
                 {activeScreen === 'voice' && (
                   <motion.div
                     key="voice"
@@ -309,24 +359,7 @@ export default function App() {
               </AnimatePresence>
             </main>
 
-            {/* Application Footer with links at the bottom */}
-            <AppFooter
-              currentScreen={activeScreen}
-              language={language}
-              onNavigate={(screen) => {
-                if (screen === 'settings') {
-                  setSettingsSubPage('main');
-                }
-                setActiveScreen(screen);
-              }}
-              onSelectSubPage={(sub) => {
-                setSettingsSubPage(sub);
-                setActiveScreen('settings');
-              }}
-              onLanguageChange={handleLanguageChange}
-            />
-
-            {/* Bottom Navigation (Primary Tabs: Dashboard, History, Voice, Alerts, Settings) */}
+            {/* Bottom Navigation (Primary Tabs, compact and mobile-first) */}
             <BottomNav
               currentScreen={activeScreen}
               onNavigate={(screen) => {

@@ -233,7 +233,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({
             </div>
             <div>
               <p className="font-bold text-sm text-red-200">
-                {t.sosActiveTitle} ({emergencyState.secondsRemaining}s)
+                POSSIBLE EMERGENCY DETECTED ({emergencyState.secondsRemaining}s)
               </p>
               <p className="text-xs text-red-300">
                 {t.voiceSayCancelToStop}
