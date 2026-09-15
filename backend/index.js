@@ -18,6 +18,23 @@ const {
 
 const app = express();
 
+// Trust Render's reverse proxy (correct IP + secure cookies)
+app.set("trust proxy", 1);
+
+const DEPLOYED_COMMIT =
+  process.env.RENDER_GIT_COMMIT ||
+  process.env.GIT_COMMIT ||
+  process.env.RENDER_GIT_BRANCH ||
+  process.env.GIT_SHA ||
+  "unknown";
+const APP_VERSION = (() => {
+  try {
+    return require("./package.json").version || "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+})();
+
 const allowedOrigins = String(process.env.FRONTEND_URL || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -1318,38 +1335,73 @@ app.post("/api/password-reset", async (req, res) => {
 // GET HEALTH
 // GET /api/health?uid=UID
 //
-// FIRST:
-// memory cache
-//
-// SECOND:
-// Firestore
+// DUAL MODE:
+// - No Bearer token -> unauthenticated Render probe (200 JSON)
+// - Bearer token + uid -> authenticated telemetry fetch
 //
 // This prevents the frontend from reading Firestore
-// on every dashboard refresh.
+// on every dashboard refresh while keeping Render health
+// checks healthy without authentication.
 // ============================================================
 
 app.get(
   "/api/health",
-  requireFirebaseAuth,
   async (req, res) => {
-    const uid =
-      requireOwnUid(
-        req,
-        res
-      );
+    const token = getBearerToken(req);
 
-    if (!uid) return;
+    // --------------------------------------------------------
+    // Render health probe (no auth) -> 200 JSON immediately
+    // --------------------------------------------------------
+    if (!token) {
+      // No secrets, just status for load balancer / Render
+      console.log("[HEALTH] probe ok (unauthenticated) commit:", DEPLOYED_COMMIT);
+      return res.status(200).json({
+        status: "ok",
+        service: "SoberWatch Telemetry API",
+        firebase: firebaseReady ? "connected" : "not_connected",
+        version: APP_VERSION,
+        commit: DEPLOYED_COMMIT,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // --------------------------------------------------------
+    // Authenticated health -> verify token first
+    // --------------------------------------------------------
+    if (!firebaseReady) {
+      console.error("[HEALTH] auth failed: Firebase not connected");
+      return res.status(401).json({
+        status: "error",
+        message: "Authentication required",
+      });
+    }
+
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      req.firebaseUser = decodedToken;
+    } catch (error) {
+      console.error(
+        "HEALTH AUTH ERROR:",
+        error.code || error.message
+      );
+      return res.status(401).json({
+        status: "error",
+        message: "Invalid or expired authentication token",
+      });
+    }
+
+    const uid = requireOwnUid(req, res);
+    if (!uid) {
+      console.warn("[HEALTH] UID mismatch for user", req.firebaseUser.uid);
+      return;
+    }
 
     // --------------------------------------------------------
     // 1. LATEST MEMORY CACHE
     // --------------------------------------------------------
-
-    const memoryHealth =
-      latestTelemetryCache.get(
-        uid
-      );
-
+    const memoryHealth = latestTelemetryCache.get(uid);
     if (memoryHealth) {
+      console.log("[HEALTH] success (memory_cache) uid:", uid);
       return res.status(200).json({
         status: "success",
         source: "memory_cache",
@@ -1360,14 +1412,9 @@ app.get(
     // --------------------------------------------------------
     // 2. HEALTH CACHE
     // --------------------------------------------------------
-
-    const cachedHealth =
-      getCache(
-        healthCache,
-        uid
-      );
-
+    const cachedHealth = getCache(healthCache, uid);
     if (cachedHealth) {
+      console.log("[HEALTH] success (cache) uid:", uid);
       return res.status(200).json({
         status: "success",
         source: "cache",
@@ -1375,101 +1422,61 @@ app.get(
       });
     }
 
-    if (
-      !firebaseReady ||
-      !db
-    ) {
+    if (!firebaseReady || !db) {
+      console.error("[HEALTH] Firestore not connected uid:", uid);
       return res.status(503).json({
         status: "error",
-        message:
-          "Firebase is not connected",
+        message: "Firebase is not connected",
       });
     }
 
     try {
-      const userDoc =
-        await db
-          .collection("users")
-          .doc(uid)
-          .get();
-
+      const userDoc = await db.collection("users").doc(uid).get();
       if (!userDoc.exists) {
+        console.warn("[HEALTH] user not found uid:", uid);
         return res.status(404).json({
           status: "error",
-          message:
-            "User not found",
+          message: "User not found",
         });
       }
-
-      const userData =
-        userDoc.data();
-
-      if (
-        !userData.lastReading
-      ) {
+      const userData = userDoc.data();
+      if (!userData.lastReading) {
+        console.log("[HEALTH] no reading available uid:", uid);
         return res.status(404).json({
           status: "error",
-          message:
-            "No health reading available",
+          message: "No health reading available",
         });
       }
-
-      setCache(
-        healthCache,
-        uid,
-        userData.lastReading,
-        HEALTH_CACHE_MS
-      );
-
-      latestTelemetryCache.set(
-        uid,
-        userData.lastReading
-      );
-
+      setCache(healthCache, uid, userData.lastReading, HEALTH_CACHE_MS);
+      latestTelemetryCache.set(uid, userData.lastReading);
+      console.log("[HEALTH] success (firestore) uid:", uid);
       return res.status(200).json({
         status: "success",
         source: "firestore",
-        data:
-          userData.lastReading,
+        data: userData.lastReading,
       });
     } catch (error) {
-      console.error(
-        "HEALTH ERROR:",
-        error
-      );
-
-      if (
-        isResourceExhausted(
-          error
-        )
-      ) {
-        const fallback =
-          latestTelemetryCache.get(
-            uid
-          );
-
+      console.error("HEALTH ERROR:", error);
+      if (isResourceExhausted(error)) {
+        const fallback = latestTelemetryCache.get(uid);
         if (fallback) {
+          console.log("[HEALTH] success (memory_fallback) uid:", uid);
           return res.status(200).json({
             status: "success",
-            source:
-              "memory_fallback",
+            source: "memory_fallback",
             data: fallback,
           });
         }
-
         return res.status(429).json({
           status: "error",
-          message:
-            "Firestore quota temporarily exceeded.",
-          code:
-            "RESOURCE_EXHAUSTED",
+          message: "Firestore quota temporarily exceeded.",
+          code: "RESOURCE_EXHAUSTED",
         });
       }
-
+      console.error("[HEALTH] failed uid:", uid, error.message);
       return res.status(500).json({
         status: "error",
-        message:
-          "Failed to fetch health data",
+        message: "Failed to fetch health data",
       });
     }
   }
@@ -1528,6 +1535,7 @@ app.get(
       );
 
     if (cached) {
+      console.log("[READINGS] success (cache) uid:", uid, "count:", cached.length);
       return res.status(200).json({
         status: "success",
         source: "cache",
@@ -1543,6 +1551,7 @@ app.get(
       !firebaseReady ||
       !db
     ) {
+      console.error("[READINGS] Firestore not connected uid:", uid);
       return res.status(503).json({
         status: "error",
         message:
@@ -1578,6 +1587,7 @@ app.get(
         READINGS_CACHE_MS
       );
 
+      console.log("[READINGS] success (firestore) uid:", uid, "count:", readings.length);
       return res.status(200).json({
         status: "success",
         source: "firestore",
@@ -1591,6 +1601,7 @@ app.get(
         "READINGS ERROR:",
         error
       );
+      console.error("[READINGS] failed uid:", uid, error.message || error);
 
       if (
         isResourceExhausted(
@@ -3191,6 +3202,29 @@ app.use(
 );
 
 // ============================================================
+// ROUTE REGISTRATION LOG (startup)
+// ============================================================
+console.log("[STARTUP] SoberWatch backend initializing...");
+console.log("[STARTUP] version:", APP_VERSION, "commit:", DEPLOYED_COMMIT);
+console.log("[STARTUP] Firebase ready:", firebaseReady ? "connected" : "not_connected");
+console.log("[ROUTES] Registered:");
+console.log("  GET  /");
+console.log("  POST /api/register");
+console.log("  POST /api/login");
+console.log("  POST /api/forgot-password/request");
+console.log("  POST /api/forgot-password/verify");
+console.log("  POST /api/forgot-password/reset");
+console.log("  GET  /api/health (dual: probe 200 JSON + authenticated telemetry)");
+console.log("  GET  /api/readings?uid=UID (auth required, 401 JSON if no token, never HTML)");
+console.log("  POST /uploadTelemetry (x-api-key or Bearer)");
+console.log("  POST /testTelemetry");
+console.log("  POST /api/emergency");
+console.log("  GET  /api/emergencies");
+console.log("  POST /api/ai/*");
+console.log("  GET  /api/search");
+console.log("  POST /api/voice/*");
+
+// ============================================================
 // SERVER
 // ============================================================
 
@@ -3199,9 +3233,10 @@ const PORT =
 
 app.listen(
   PORT,
+  "0.0.0.0",
   () => {
     console.log(
-      `SoberWatch backend running on port ${PORT}`
+      `[SOBERWATCH] backend running on 0.0.0.0:${PORT} commit=${DEPLOYED_COMMIT} version=${APP_VERSION}`
     );
 
     console.log(
@@ -3219,7 +3254,13 @@ app.listen(
     console.log(
       `History write interval: ${HISTORY_WRITE_INTERVAL_MS}ms`
     );
+
+    console.log(
+      `User lastReading interval: ${USER_LAST_READING_INTERVAL_MS}ms`
+    );
+
+    console.log(
+      `Max readings limit: ${MAX_READINGS_LIMIT}`
+    );
   }
 );
-
-// Render deployment verification marker: 20260915153025

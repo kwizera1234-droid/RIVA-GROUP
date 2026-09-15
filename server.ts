@@ -242,13 +242,22 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
+    // CRITICAL: Never serve HTML for API routes. Frontend API must use the real backend
+    // at https://soberwatch-backend.onrender.com — this prevents masking a misconfigured Render.
+    app.all('/api/*', (_req, res) => {
+      res.status(404).json({
+        status: 'error',
+        message: 'API endpoint not found on frontend server. SoberWatch telemetry API must be served by backend/index.js at https://soberwatch-backend.onrender.com',
+        code: 'FRONTEND_API_MISCONFIG',
+      });
+    });
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SOBERWATCH] Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[SOBERWATCH-FRONTEND] Server running on http://0.0.0.0:${PORT} (frontend SPA only; telemetry API is at https://soberwatch-backend.onrender.com)`);
   });
 }
 

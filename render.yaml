@@ -3,6 +3,8 @@ services:
     name: soberwatch-backend
     runtime: node
     plan: free
+    repo: https://github.com/kwizera1234-droid/RIVA-GROUP
+    branch: main
     rootDir: backend
     buildCommand: npm install --no-audit --no-fund
     startCommand: npm start

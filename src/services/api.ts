@@ -35,7 +35,23 @@ async function authenticatedHeaders(contentType = false): Promise<Record<string,
   };
 }
 
+function assertJsonContentType(response: Response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    // Real telemetry pipeline must never silently accept HTML (React index.html) as telemetry.
+    const snippet = contentType.toLowerCase().includes('text/html')
+      ? 'Backend returned HTML (frontend) instead of JSON — Render is serving the React app instead of backend/index.js'
+      : `Backend returned invalid Content-Type "${contentType || 'unknown'}"`;
+    throw new ApiError(
+      `${snippet}. Expected application/json from ${response.url} (HTTP ${response.status})`,
+      response.status || 502,
+      'INVALID_CONTENT_TYPE',
+    );
+  }
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
+  assertJsonContentType(response);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new ApiError(
@@ -81,20 +97,29 @@ function normalizeReading(raw: Record<string, unknown>): TelemetryReading {
   };
 }
 
-// Check Backend Health (GET / returns status)
+// Check Backend Health (GET /api/health returns real backend JSON, not HTML)
 export async function checkBackendHealth(): Promise<{ online: boolean; message?: string }> {
   const base = getBackendUrl();
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch(`${base}/`, {
+    const res = await fetch(`${base}/api/health`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
       signal: controller.signal
     });
     clearTimeout(timeoutId);
-
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.toLowerCase().includes('application/json')) {
+      return { online: false, message: `Invalid backend Content-Type "${ct || 'unknown'}" — backend not serving JSON` };
+    }
     if (res.ok) {
+      // Validate it's real JSON, not HTML masquerading
+      try {
+        await res.clone().json();
+      } catch {
+        return { online: false, message: 'Backend health returned non-JSON' };
+      }
       return { online: true };
     }
     return { online: false, message: `HTTP ${res.status}` };
@@ -154,6 +179,7 @@ export async function apiFetchReadings(uid: string, signal?: AbortSignal): Promi
       headers: await authenticatedHeaders(),
       signal: controller.signal,
     });
+    assertJsonContentType(response);
     const data = await parseResponse<{ readings?: unknown[] }>(response);
     if (!Array.isArray(data.readings)) throw new ApiError('Backend returned no readings array', 502, 'INVALID_RESPONSE');
     return data.readings.map((reading) => normalizeReading(reading as Record<string, unknown>));
@@ -161,6 +187,8 @@ export async function apiFetchReadings(uid: string, signal?: AbortSignal): Promi
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new ApiError('Telemetry request timed out', 408, 'TIMEOUT');
     }
+    // Ensure HTML never masquerades as telemetry
+    if (error instanceof ApiError && error.code === 'INVALID_CONTENT_TYPE') throw error;
     throw error;
   } finally {
     clearTimeout(timeoutId);
@@ -179,6 +207,7 @@ export async function apiFetchHealth(uid: string): Promise<TelemetryReading> {
       headers: await authenticatedHeaders(),
       signal: controller.signal,
     });
+    assertJsonContentType(response);
     const data = await parseResponse<{ data?: Record<string, unknown> }>(response);
     if (!data.data) throw new ApiError('Backend returned no latest reading', 404, 'NO_DATA');
     return normalizeReading(data.data);
@@ -186,6 +215,7 @@ export async function apiFetchHealth(uid: string): Promise<TelemetryReading> {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new ApiError('Health request timed out', 408, 'TIMEOUT');
     }
+    if (error instanceof ApiError && error.code === 'INVALID_CONTENT_TYPE') throw error;
     throw error;
   } finally {
     clearTimeout(timeoutId);

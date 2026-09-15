@@ -72,7 +72,7 @@ export const AboutView: React.FC<AboutProps> = ({ language, onBack }) => {
       {/* Useful Footer Links */}
       <div className="pt-2 flex flex-wrap items-center justify-center gap-4 text-xs font-mono text-white/60 border-t border-white/5">
         <a 
-          href="https://soberwatch-backend.onrender.com/api/telemetry/health" 
+          href="https://soberwatch-backend.onrender.com/api/health" 
           target="_blank" 
           rel="noopener noreferrer" 
           className="text-[#D4AF37] hover:underline"

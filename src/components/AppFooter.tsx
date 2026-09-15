@@ -131,7 +131,7 @@ export const AppFooter: React.FC<AppFooterProps> = ({
 
             <a
               id="footer-backend-api-link"
-              href={`${backendUrl}/api/telemetry/health`}
+              href={`${backendUrl}/api/health`}
               target="_blank"
               rel="noopener noreferrer"
               className="hover:text-[#D4AF37] text-white/70 transition cursor-pointer flex items-center gap-1"
