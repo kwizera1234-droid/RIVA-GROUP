@@ -54,7 +54,10 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({ language }) => {
     setCameraStatus('requesting');
     SoberWatchEmergency.captureEvidence()
       .then((result) => {
-        if (active) setCameraStatus(result.success ? 'available' : 'unavailable');
+        if (active) {
+          setCameraStatus(result.success ? 'available' : 'unavailable');
+          if (result.success && result.uri) emergencyService.recordCameraEvidence(result.uri);
+        }
       })
       .catch(() => {
         if (active) setCameraStatus('unavailable');

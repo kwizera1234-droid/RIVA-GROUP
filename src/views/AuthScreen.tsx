@@ -18,13 +18,15 @@ interface AuthProps {
   onRequireVerification: (email: string) => void;
   language: Language;
   onLanguageChange: (lang: Language) => void;
+  startupError?: string | null;
 }
 
 export const AuthScreen: React.FC<AuthProps> = ({ 
   onSuccess, 
   onRequireVerification,
   language,
-  onLanguageChange
+  onLanguageChange,
+  startupError = null,
 }) => {
   const [isRegister, setIsRegister] = useState(false);
   const [name, setName] = useState('');
@@ -34,7 +36,7 @@ export const AuthScreen: React.FC<AuthProps> = ({
     return localStorage.getItem('soberwatch_temp_avatar') || null;
   });
   const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(startupError);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const t = translations[language] || translations.en;

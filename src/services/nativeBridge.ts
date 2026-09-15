@@ -4,6 +4,9 @@ export interface SoberWatchEmergencyPluginInterface {
   startMonitoring(options?: {
     sensitivity?: 'low' | 'medium' | 'high';
     locationSharingEnabled?: boolean;
+    contacts?: Array<{ name: string; phone: string; priority?: number; isActive?: boolean }>;
+    emergencyMessage?: string;
+    simPreference?: 'SIM_1' | 'SIM_2' | 'ASK' | 'AUTOMATIC';
   }): Promise<{ success: boolean; mode: string; message: string }>;
 
   stopMonitoring(): Promise<{ success: boolean; message: string }>;
@@ -16,6 +19,7 @@ export interface SoberWatchEmergencyPluginInterface {
     accuracy?: number;
     confidence?: number;
     reason?: string;
+    nativeDispatchStarted?: boolean;
   }>;
 
   checkSensorSupport(): Promise<{
@@ -82,6 +86,10 @@ export interface SoberWatchEmergencyPluginInterface {
     callPhone: 'granted' | 'denied' | 'prompt';
     location: 'granted' | 'denied' | 'prompt';
     audio?: 'granted' | 'denied' | 'prompt';
+  }>;
+
+  requestMonitoringPermissions?(): Promise<{
+    location: 'granted' | 'denied' | 'prompt';
   }>;
 }
 
@@ -171,12 +179,24 @@ export async function syncNativeMonitoring(config: {
   crashDetectionEnabled: boolean;
   crashSensitivity: 'low' | 'medium' | 'high';
   locationSharingEnabled: boolean;
+  contacts?: Array<{ name: string; phone: string; priority?: number; isActive?: boolean }>;
+  emergencyMessage?: string;
+  simPreference?: 'SIM_1' | 'SIM_2' | 'ASK' | 'AUTOMATIC';
 }) {
   try {
     if (config.crashDetectionEnabled) {
+      if (SoberWatchEmergency.requestMonitoringPermissions) {
+        const permissions = await SoberWatchEmergency.requestMonitoringPermissions();
+        if (config.locationSharingEnabled && permissions.location !== 'granted') {
+          return { success: false, mode: 'PERMISSION_REQUIRED', message: 'Location permission is required for emergency monitoring' };
+        }
+      }
       return await SoberWatchEmergency.startMonitoring({
         sensitivity: config.crashSensitivity,
         locationSharingEnabled: config.locationSharingEnabled,
+        contacts: config.contacts,
+        emergencyMessage: config.emergencyMessage,
+        simPreference: config.simPreference,
       });
     }
     return await SoberWatchEmergency.stopMonitoring();

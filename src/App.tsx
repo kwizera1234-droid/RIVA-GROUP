@@ -21,10 +21,12 @@ import { ActiveScreen, TelemetryReading, UserProfile, Language, SettingsSubPage 
 import { apiFetchReadings } from './services/api';
 import { emergencyService } from './services/emergencyService';
 import { VoiceAssistantView } from './views/VoiceAssistantView';
-import { waitForAuthRestore, userToProfile } from './services/firebase';
+import { firebaseErrorMessage, waitForAuthRestore, userToProfile } from './services/firebase';
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('splash');
+  const [authRestoreComplete, setAuthRestoreComplete] = useState(false);
+  const [authRestoreError, setAuthRestoreError] = useState<string | null>(null);
   const [settingsSubPage, setSettingsSubPage] = useState<SettingsSubPage>('main');
   const [isDrawerMenuOpen, setIsDrawerMenuOpen] = useState<boolean>(false);
   const [language, setLanguage] = useState<Language>(() => {
@@ -44,6 +46,9 @@ export default function App() {
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const prevLatestTimestampRef = useRef<number | null>(null);
+  const telemetryInFlightRef = useRef(false);
+  const telemetryControllerRef = useRef<AbortController | null>(null);
+  const analysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -54,13 +59,23 @@ export default function App() {
           setUser(restoredUser);
           localStorage.setItem('soberwatch_user', JSON.stringify(restoredUser));
         }
+        if (active) setAuthRestoreComplete(true);
       })
       .catch((error) => {
         console.error('Firebase auth restore failed:', error);
+        if (active) {
+          setAuthRestoreError(firebaseErrorMessage(error));
+          setAuthRestoreComplete(true);
+        }
       });
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => () => {
+    telemetryControllerRef.current?.abort();
+    if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
   }, []);
 
   const handleLanguageChange = (lang: Language) => {
@@ -71,45 +86,58 @@ export default function App() {
   // Load real telemetry data strictly from backend
   const loadTelemetry = useCallback(async (isInitial = false) => {
     if (!user?.uid) {
+      telemetryControllerRef.current?.abort();
       setReadings([]);
       setCurrentReading(null);
       setFetchError(null);
       if (isInitial) setIsLoading(false);
       return;
     }
+    if (telemetryInFlightRef.current) return;
     if (isInitial) setIsLoading(true);
+    telemetryInFlightRef.current = true;
+    const controller = new AbortController();
+    telemetryControllerRef.current = controller;
     
     try {
       setFetchError(null);
-      const fetched = await apiFetchReadings(user.uid);
+      const fetched = await apiFetchReadings(user.uid, controller.signal);
+      if (controller.signal.aborted) return;
       setReadings(fetched);
       const latest = fetched[0] ?? null;
 
       if (latest && latest.timestamp !== prevLatestTimestampRef.current) {
         prevLatestTimestampRef.current = latest.timestamp;
         setIsAnalyzing(true);
-        setTimeout(() => setIsAnalyzing(false), 2000);
+        if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
+        analysisTimerRef.current = setTimeout(() => setIsAnalyzing(false), 2000);
       }
 
       setCurrentReading(latest);
     } catch (e) {
+      if (controller.signal.aborted) return;
       console.error('Error fetching telemetry:', e);
       setFetchError(e instanceof Error ? e.message : 'Unable to fetch telemetry from backend');
       setReadings([]);
       setCurrentReading(null);
     } finally {
+      telemetryInFlightRef.current = false;
       if (isInitial) setIsLoading(false);
     }
   }, [user?.uid]);
 
   // Polling every 5 seconds for real-time updates
   useEffect(() => {
+    if (!authRestoreComplete) return;
     loadTelemetry(true);
     const interval = setInterval(() => {
       loadTelemetry(false);
     }, 5000);
-    return () => clearInterval(interval);
-  }, [loadTelemetry]);
+    return () => {
+      clearInterval(interval);
+      telemetryControllerRef.current?.abort();
+    };
+  }, [authRestoreComplete, loadTelemetry]);
 
   // Reset danger dismissed if status changes or new reading arrives
   useEffect(() => {
@@ -160,6 +188,7 @@ export default function App() {
             language={language}
             onLanguageChange={handleLanguageChange}
             onSuccess={handleAuthSuccess}
+            startupError={authRestoreError}
             onRequireVerification={(email) => {
               setVerifyingEmail(email);
               setActiveScreen('verify');
@@ -238,6 +267,7 @@ export default function App() {
                       language={language}
                       isLoading={isLoading}
                       isAnalyzing={isAnalyzing}
+                      error={fetchError}
                       onOpenVoice={() => setActiveScreen('voice')}
                     />
                   </motion.div>

@@ -1,6 +1,9 @@
 node_modules/
 build/
-dist/
+# dist is intentionally NOT ignored so Render can fallback to committed assets
+# if vite build OOMs. Build artifacts are still generated via `npm run build`.
+# To ignore dev build noise locally, uncomment next line:
+# dist/
 coverage/
 .DS_Store
 *.log

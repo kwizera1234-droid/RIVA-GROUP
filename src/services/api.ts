@@ -142,10 +142,12 @@ export async function apiLogin(email: string, password: string): Promise<{ succe
 }
 
 // Fetch authenticated readings from GET /api/readings?uid=UID&limit=100.
-export async function apiFetchReadings(uid: string): Promise<TelemetryReading[]> {
+export async function apiFetchReadings(uid: string, signal?: AbortSignal): Promise<TelemetryReading[]> {
   if (!uid.trim()) throw new ApiError('A Firebase UID is required to fetch readings', 401, 'AUTH_REQUIRED');
   const base = getBackendUrl();
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  signal?.addEventListener('abort', abortFromCaller, { once: true });
   const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await fetch(`${base}/api/readings?uid=${encodeURIComponent(uid)}&limit=100`, {
@@ -162,6 +164,7 @@ export async function apiFetchReadings(uid: string): Promise<TelemetryReading[]>
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 
@@ -262,6 +265,8 @@ export async function apiSendEmergencyEvent(payload: {
   notes?: string;
   mapsUrl?: string;
   recognizedText?: string;
+  evidenceUri?: string;
+  cameraVerified?: boolean;
 }): Promise<{ success: boolean; message: string }> {
   const base = getBackendUrl();
   if (!payload.uid.trim()) throw new ApiError('A Firebase UID is required to log an emergency', 401, 'AUTH_REQUIRED');
@@ -284,6 +289,8 @@ export async function apiSendEmergencyEvent(payload: {
         mapsUrl: payload.mapsUrl,
         notes: payload.notes,
         recognizedText: payload.recognizedText,
+        evidenceUri: payload.evidenceUri,
+        cameraVerified: payload.cameraVerified === true,
       }),
       signal: controller.signal,
     });

@@ -47,6 +47,10 @@ import com.getcapacitor.annotation.PermissionCallback;
         @Permission(
             strings = { Manifest.permission.CAMERA },
             alias = "camera"
+        ),
+        @Permission(
+            strings = { Manifest.permission.SEND_SMS },
+            alias = "sms"
         )
     }
 )
@@ -70,6 +74,10 @@ public class SoberWatchEmergencyPlugin extends Plugin {
         Intent serviceIntent = new Intent(getContext(), SoberWatchMonitoringService.class);
         serviceIntent.putExtra("sensitivity", call.getString("sensitivity", "medium"));
         serviceIntent.putExtra("locationSharingEnabled", shareLocation);
+        com.getcapacitor.JSArray contacts = call.getArray("contacts");
+        serviceIntent.putExtra("contactsJson", contacts == null ? "[]" : contacts.toString());
+        serviceIntent.putExtra("emergencyMessage", call.getString("emergencyMessage", "SoberWatch detected a serious incident."));
+        serviceIntent.putExtra("simPreference", call.getString("simPreference", "AUTOMATIC"));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getContext().startForegroundService(serviceIntent);
         } else {
@@ -129,6 +137,7 @@ public class SoberWatchEmergencyPlugin extends Plugin {
             ret.put("accuracy", prefs.getFloat("accuracy", 0));
             ret.put("confidence", prefs.getFloat("confidence", 0));
             ret.put("reason", prefs.getString("reason", "Multiple motion signals"));
+            ret.put("nativeDispatchStarted", prefs.getBoolean("native_dispatch_started", false));
             prefs.edit().putBoolean("pending_accident", false).apply();
         }
         call.resolve(ret);
@@ -218,9 +227,21 @@ public class SoberWatchEmergencyPlugin extends Plugin {
         requestPermissionForAliases(new String[] { CALL_PHONE_ALIAS, "location", AUDIO_ALIAS, "camera" }, call, "permissionsCallback");
     }
 
+    @PluginMethod
+    public void requestMonitoringPermissions(PluginCall call) {
+        requestPermissionForAliases(new String[] { "location" }, call, "monitoringPermissionsCallback");
+    }
+
     @PermissionCallback
     private void permissionsCallback(PluginCall call) {
         checkPermissions(call);
+    }
+
+    @PermissionCallback
+    private void monitoringPermissionsCallback(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("location", hasLocationPermission(getContext()) ? "granted" : "denied");
+        call.resolve(ret);
     }
 
     private String permissionState(String permission) {

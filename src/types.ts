@@ -98,6 +98,8 @@ export interface EmergencyEventRecord {
   callStatus: 'pending' | 'success' | 'failed' | 'cancelled';
   callMode?: 'ACTION_CALL' | 'ACTION_DIAL';
   notes?: string;
+  evidenceUri?: string;
+  cameraVerified?: boolean;
   backendLogged: boolean;
   recognizedText?: string;
   detectionConfidence?: number;

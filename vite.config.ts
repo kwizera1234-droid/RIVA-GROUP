@@ -11,6 +11,15 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      // Don't wipe dist/server.cjs built by esbuild; keep fallback assets if vite OOMs
+      emptyOutDir: false,
+      sourcemap: false,
+      chunkSizeWarningLimit: 1500,
+      rollupOptions: {
+        maxParallelFileOps: 2,
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.

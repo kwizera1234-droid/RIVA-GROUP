@@ -23,7 +23,7 @@ const DEFAULT_CONFIG: EmergencySettingsConfig = {
   crashDetectionEnabled: true,
   fallDetectionEnabled: true,
   crashSensitivity: 'medium',
-  cameraVerificationEnabled: false,
+  cameraVerificationEnabled: true,
   locationSharingEnabled: true,
   satelliteDisplayEnabled: true,
   emergencyMessage: 'SoberWatch detected a possible emergency. Please respond immediately.',
@@ -47,7 +47,7 @@ class EmergencyService {
 
   constructor() {
     this.config = this.loadConfig();
-    void syncNativeMonitoring(this.config);
+    void this.syncNativeMonitoring();
     this.nativePollingTimer = setInterval(() => {
       void this.consumeNativeAccidentSignal();
     }, 1500);
@@ -60,7 +60,19 @@ class EmergencyService {
   public updateConfig(partial: Partial<EmergencySettingsConfig>) {
     this.config = { ...this.config, ...partial };
     this.saveConfig();
-    void syncNativeMonitoring(this.config);
+    void this.syncNativeMonitoring();
+  }
+
+  private syncNativeMonitoring() {
+    return syncNativeMonitoring({
+      ...this.config,
+      contacts: this.getActiveContacts().map((contact) => ({
+        name: contact.name,
+        phone: contact.phone,
+        priority: contact.priority,
+        isActive: contact.isActive,
+      })),
+    });
   }
 
   private loadConfig(): EmergencySettingsConfig {
@@ -157,6 +169,14 @@ class EmergencyService {
 
   public getSecondsRemaining(): number {
     return this.secondsRemaining;
+  }
+
+  public recordCameraEvidence(uri: string) {
+    if (!this.currentEvent || !uri.trim()) return;
+    this.currentEvent.evidenceUri = uri;
+    this.currentEvent.cameraVerified = true;
+    this.currentEvent.notes = `${this.currentEvent.notes || ''} | Camera evidence captured and verified`;
+    this.notify();
   }
 
   /**
@@ -330,6 +350,8 @@ class EmergencyService {
           mapsUrl: this.currentEvent.mapsUrl,
           notes: this.currentEvent.notes,
           recognizedText: this.currentEvent.recognizedText,
+          evidenceUri: this.currentEvent.evidenceUri,
+          cameraVerified: this.currentEvent.cameraVerified,
         });
         this.currentEvent.backendLogged = backendRes.success;
       } catch (logErr) {
@@ -438,7 +460,15 @@ class EmergencyService {
     try {
       const pending = await SoberWatchEmergency.getPendingAccident();
       if (!pending.detected) return;
-      const location = typeof pending.latitude === 'number' && typeof pending.longitude === 'number'
+      const hasValidLocation =
+        typeof pending.latitude === 'number' &&
+        typeof pending.longitude === 'number' &&
+        Number.isFinite(pending.latitude) &&
+        Number.isFinite(pending.longitude) &&
+        Math.abs(pending.latitude) <= 90 &&
+        Math.abs(pending.longitude) <= 180 &&
+        (pending.latitude !== 0 || pending.longitude !== 0);
+      const location = hasValidLocation
         ? {
             latitude: pending.latitude,
             longitude: pending.longitude,

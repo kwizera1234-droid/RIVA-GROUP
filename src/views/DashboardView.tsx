@@ -16,7 +16,7 @@ import {
   Pie,
   Cell,
 } from 'recharts';
-import { Activity, AlertTriangle, HeartPulse, Wifi, WifiOff, ShieldCheck, Gauge, TrendingUp, Sparkles } from 'lucide-react';
+import { Activity, AlertTriangle, HeartPulse, Wifi, WifiOff, ShieldCheck, Gauge, TrendingUp, Sparkles, Database } from 'lucide-react';
 import { TelemetryReading, ReadingStatus, Language } from '../types';
 import { translations } from '../i18n/translations';
 import { AIInsightCard } from '../components/AIInsightCard';
@@ -28,6 +28,7 @@ interface DashboardProps {
   language: Language;
   isLoading: boolean;
   isAnalyzing: boolean;
+  error?: string | null;
   onOpenVoice?: () => void;
 }
 
@@ -37,6 +38,7 @@ export const DashboardView: React.FC<DashboardProps> = ({
   language,
   isLoading,
   isAnalyzing,
+  error,
 }) => {
   const t = translations[language] || translations.en;
 
@@ -143,8 +145,12 @@ export const DashboardView: React.FC<DashboardProps> = ({
     return (
       <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 py-12 pb-28 text-center">
         <Database className="mx-auto w-10 h-10 text-white/30" />
-        <h2 className="mt-4 text-lg font-semibold text-white">No backend telemetry available</h2>
-        <p className="mt-2 text-sm text-white/50">The server has not returned a verified reading for this account.</p>
+        <h2 className="mt-4 text-lg font-semibold text-white">
+          {error ? 'Unable to load backend telemetry' : 'No backend telemetry available'}
+        </h2>
+        <p className="mt-2 text-sm text-white/50">
+          {error || 'The server has not returned a verified reading for this account.'}
+        </p>
       </div>
     );
   }
