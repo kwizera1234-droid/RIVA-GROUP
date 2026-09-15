@@ -7,6 +7,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
+// BACKEND_PROXY_MARKER
+app.use('/api', async (req, res, next) => {
+  if (req.path === '/readings' || req.path === '/health') {
+    return res.status(503).json({status:'error',message:'Use deployed backend service configuration: Root Directory=backend, Start Command=npm start'});
+  }
+  next();
+});
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json({ limit: '50mb' }));
